@@ -114,18 +114,33 @@ class LoginFlow:
             self.task.cancel()
 
 
-async def list_chats(telegram_id: int, phone: str) -> list[tuple[int, str, str]]:
-    """Возвращает (id, тип, название) — только группы и каналы."""
+async def list_chats(telegram_id: int, phone: str) -> list[dict]:
+    """
+    Группы и каналы аккаунта с приметами для выбора.
+
+    Названий мало: в жизни бывает два чата «5 З» — с учителем и без.
+    Поэтому отдаём ещё число участников и время последнего сообщения,
+    по ним человек опознаёт нужный чат надёжнее, чем по имени.
+    """
     with crypto.session_workdir(telegram_id) as work_dir:
         client = Client(phone=phone, work_dir=str(work_dir))
         await client.connect()
         try:
             chats = await client.fetch_chats()
-            return [
-                (chat.id, str(chat.type or ""), chat.title or "(без названия)")
-                for chat in chats
-                if chat.title
-            ]
+            groups = []
+            for chat in chats:
+                if not chat.title or str(chat.type or "").upper() not in {"CHAT", "CHANNEL", "GROUP"}:
+                    continue
+                groups.append(
+                    {
+                        "id": chat.id,
+                        "title": chat.title,
+                        "participants": chat.participants_count or 0,
+                        "last_event": chat.last_event_time or 0,
+                    }
+                )
+            # Самые живые сверху: нужный чат почти всегда среди них
+            return sorted(groups, key=lambda c: c["last_event"], reverse=True)
         finally:
             await client.close()
 

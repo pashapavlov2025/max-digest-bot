@@ -12,6 +12,9 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -224,30 +227,75 @@ async def _finish_login(message: Message, state: FSMContext) -> None:
         await state.clear()
         return
 
-    groups = [c for c in chats if c[1].upper() in {"CHAT", "CHANNEL", "GROUP"}]
-    if not groups:
+    if not chats:
         await message.answer(texts.NO_CHATS)
         await state.clear()
         return
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=title[:60], callback_data=f"chat:{chat_id}")]
-            for chat_id, _, title in groups[:20]
-        ]
-    )
-    await message.answer(texts.CHOOSE_CHAT, reply_markup=keyboard)
+    await show_chat_picker(message, state, chats, texts.CHOOSE_CHAT)
     await state.set_state(Onboarding.chat)
+
+
+def describe_chat(chat: dict, timezone: str) -> str:
+    """Приметы чата: по ним человек отличает похожие названия."""
+    marks = []
+    if chat["participants"]:
+        marks.append(f"{chat['participants']} чел.")
+    if chat["last_event"]:
+        seconds = chat["last_event"] / 1000 if chat["last_event"] > 10**12 else chat["last_event"]
+        moment = datetime.fromtimestamp(seconds, ZoneInfo(timezone))
+        today = datetime.now(ZoneInfo(timezone)).date()
+        if moment.date() == today:
+            marks.append(f"писали сегодня в {moment:%H:%M}")
+        else:
+            marks.append(f"последнее {moment:%d.%m}")
+    return " · ".join(marks) or "нет данных"
+
+
+async def show_chat_picker(message: Message, state: FSMContext, chats: list[dict], header: str) -> None:
+    """Показывает пронумерованный список с приметами и кнопки-цифры под ним."""
+    shown = chats[:8]
+    await state.update_data(
+        chats={str(c["id"]): c["title"] for c in chats},
+        all_chats=chats,
+    )
+
+    lines = [header, ""]
+    for number, chat in enumerate(shown, 1):
+        lines.append(f"<b>{number}. {chat['title']}</b>\n    <i>{describe_chat(chat, config.timezone)}</i>")
+
+    buttons = [
+        InlineKeyboardButton(text=str(number), callback_data=f"chat:{chat['id']}")
+        for number, chat in enumerate(shown, 1)
+    ]
+    rows = [buttons[i : i + 4] for i in range(0, len(buttons), 4)]
+    await message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@router.message(Onboarding.chat)
+async def on_chat_search(message: Message, state: FSMContext) -> None:
+    """В состоянии выбора текст трактуем как поиск по названию."""
+    query = (message.text or "").strip()
+    if not query:
+        return
+
+    data = await state.get_data()
+    chats = data.get("all_chats") or []
+    found = [c for c in chats if query.lower() in c["title"].lower()]
+
+    if found:
+        await show_chat_picker(message, state, found, texts.CHAT_FOUND.format(query=query))
+    else:
+        await show_chat_picker(message, state, chats, texts.CHAT_SEARCH_EMPTY.format(query=query))
 
 
 @router.callback_query(F.data.startswith("chat:"))
 async def on_chat_chosen(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
-    chat_id = int(callback.data.split(":", 1)[1])
-    title = next(
-        (row.text for row in sum(callback.message.reply_markup.inline_keyboard, []) if row.callback_data == callback.data),
-        "чат",
-    )
+    chat_id = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+    title = (data.get("chats") or {}).get(chat_id, "чат")
+    chat_id = int(chat_id)
     db.update_user(callback.from_user.id, chat_id=chat_id, chat_title=title)
     await callback.message.answer(texts.CHOOSE_TIME.format(title=title), reply_markup=_time_keyboard())
     await state.set_state(Onboarding.time)

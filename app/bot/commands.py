@@ -5,9 +5,11 @@ import secrets
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .. import crypto, db, max_client, service
+from .handlers import Onboarding, show_chat_picker
 from ..config import config
 from . import texts
 
@@ -89,7 +91,7 @@ async def on_toggle(callback: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == "reconfigure")
-async def on_reconfigure(callback: CallbackQuery) -> None:
+async def on_reconfigure(callback: CallbackQuery, state: FSMContext) -> None:
     """Смена чата и времени без повторного входа в MAX — сессия уже есть."""
     await callback.answer()
     user = db.get_user(callback.from_user.id)
@@ -104,18 +106,12 @@ async def on_reconfigure(callback: CallbackQuery) -> None:
         await callback.message.answer(texts.SESSION_BROKEN.format(error=exc))
         return
 
-    groups = [c for c in chats if c[1].upper() in {"CHAT", "CHANNEL", "GROUP"}]
-    if not groups:
+    if not chats:
         await callback.message.answer(texts.NO_CHATS)
         return
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=title[:60], callback_data=f"chat:{chat_id}")]
-            for chat_id, _, title in groups[:20]
-        ]
-    )
-    await callback.message.answer(texts.CHOOSE_CHAT, reply_markup=keyboard)
+    await show_chat_picker(callback.message, state, chats, texts.CHOOSE_CHAT)
+    await state.set_state(Onboarding.chat)
 
 
 @router.message(Command("stop"))
