@@ -7,7 +7,7 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from .. import crypto, db, service
+from .. import crypto, db, max_client, service
 from ..config import config
 from . import texts
 
@@ -90,8 +90,32 @@ async def on_toggle(callback: CallbackQuery) -> None:
 
 @router.callback_query(F.data == "reconfigure")
 async def on_reconfigure(callback: CallbackQuery) -> None:
+    """Смена чата и времени без повторного входа в MAX — сессия уже есть."""
     await callback.answer()
-    await callback.message.answer("Отправьте /start — пройдём настройку заново, переподключать MAX не понадобится.")
+    user = db.get_user(callback.from_user.id)
+    if user is None or not user.phone:
+        await callback.message.answer(texts.NOT_REGISTERED)
+        return
+
+    await callback.message.answer("Смотрю, какие есть чаты…")
+    try:
+        chats = await max_client.list_chats(user.telegram_id, user.phone)
+    except Exception as exc:  # noqa: BLE001 — пользователю нужно знать причину
+        await callback.message.answer(texts.SESSION_BROKEN.format(error=exc))
+        return
+
+    groups = [c for c in chats if c[1].upper() in {"CHAT", "CHANNEL", "GROUP"}]
+    if not groups:
+        await callback.message.answer(texts.NO_CHATS)
+        return
+
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=title[:60], callback_data=f"chat:{chat_id}")]
+            for chat_id, _, title in groups[:20]
+        ]
+    )
+    await callback.message.answer(texts.CHOOSE_CHAT, reply_markup=keyboard)
 
 
 @router.message(Command("stop"))
