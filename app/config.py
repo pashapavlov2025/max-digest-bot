@@ -62,6 +62,11 @@ class Config:
     def kimi_model(self) -> str:
         return os.environ.get("KIMI_MODEL", "kimi-k2.6")
 
+    # Размышления модели: у kimi-k2.x включены по умолчанию и сильно замедляют ответ
+    @property
+    def kimi_thinking(self) -> bool:
+        return os.environ.get("KIMI_THINKING", "0") in {"1", "true", "yes"}
+
     @property
     def gigachat_auth_key(self) -> str | None:
         return os.environ.get("GIGACHAT_AUTH_KEY")

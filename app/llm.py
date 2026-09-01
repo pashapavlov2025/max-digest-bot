@@ -33,12 +33,15 @@ async def _kimi(system: str, prompt: str, json_mode: bool) -> str:
             {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.3,
     }
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
+    # У kimi-k2.x размышления включены по умолчанию и утраивают время ответа.
+    # Для сводки они не нужны: задача не на рассуждение, а на выборку фактов.
+    if config.kimi_thinking is False and config.kimi_model.startswith("kimi-k2"):
+        payload["thinking"] = {"type": "disabled"}
 
-    async with httpx.AsyncClient(timeout=180) as client:
+    async with httpx.AsyncClient(timeout=300) as client:
         response = await client.post(
             f"{config.kimi_base_url.rstrip('/')}/chat/completions",
             headers={"Authorization": f"Bearer {config.kimi_api_key}"},
