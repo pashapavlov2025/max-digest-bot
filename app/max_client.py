@@ -20,6 +20,73 @@ from . import crypto
 
 log = logging.getLogger(__name__)
 
+
+def _log_code_requests() -> None:
+    """
+    MAX не сообщает, куда именно ушёл код, но в ответе есть его длина,
+    остаток попыток и таймауты. Без этого разбирать «код не пришёл» нечем.
+    """
+    from pymax.api.auth.service import AuthService
+
+    if getattr(AuthService.request_code, "_logged", False):
+        return
+
+    original = AuthService.request_code
+
+    async def logged(self, phone: str):  # type: ignore[no-untyped-def]
+        response = await original(self, phone)
+        log.info(
+            "MAX принял запрос кода: длина %s, попыток осталось %s, ждать до %s мс",
+            getattr(response, "code_length", "?"),
+            getattr(response, "request_count_left", "?"),
+            getattr(response, "request_max_duration", "?"),
+        )
+        return response
+
+    logged._logged = True  # type: ignore[attr-defined]
+    AuthService.request_code = logged  # type: ignore[method-assign]
+
+
+_log_code_requests()
+
+def describe_attachments(message) -> str:
+    """
+    Короткая пометка о вложениях.
+
+    Читать картинки мы не умеем, но молчать о них нельзя: в родительских
+    чатах расписание присылают скриншотом, а решения принимают опросом.
+    Пусть модель хотя бы знает, что сообщение было, и скажет «посмотри сам».
+    """
+    marks = []
+    for attach in getattr(message, "attaches", None) or []:
+        kind = str(getattr(attach, "type", "")).rsplit(".", 1)[-1].strip("'\"")
+
+        if kind == "POLL":
+            title = getattr(attach, "title", "") or "без названия"
+            answers = [a.get("text") if isinstance(a, dict) else getattr(a, "text", "")
+                       for a in (getattr(attach, "answers", None) or [])]
+            state = getattr(attach, "state", None)
+            votes = state.get("total") if isinstance(state, dict) else getattr(state, "total", None)
+            parts = [f"опрос «{title}»"]
+            if answers:
+                parts.append("варианты: " + " / ".join(str(a) for a in answers if a))
+            if votes:
+                parts.append(f"проголосовало {votes}")
+            marks.append("; ".join(parts))
+        elif kind == "FILE":
+            marks.append(f"файл «{getattr(attach, 'name', 'без имени')}»")
+        elif kind == "PHOTO":
+            marks.append("фото")
+        elif kind == "VIDEO":
+            marks.append("видео")
+        elif kind in {"AUDIO", "VOICE"}:
+            marks.append("голосовое сообщение")
+        elif kind == "SHARE":
+            marks.append("ссылка")
+
+    return f"[{'; '.join(marks)}]" if marks else ""
+
+
 PAGE = 100
 MAX_PAGES = 40
 # Сколько ждём код и пароль от человека, прежде чем считать вход неудавшимся
@@ -188,17 +255,21 @@ async def fetch_window(telegram_id: int, phone: str, chat_id: int, hours: int, l
 
             messages = []
             for message in history:
-                if not message.text:
-                    continue
                 raw = message.time
                 seconds = raw / 1000 if raw and raw > 10**12 else raw
                 if not seconds or seconds * 1000 < since_ms:
                     continue
+
+                # Текст и пометка о вложениях — вместе: подпись к фото тоже важна
+                text = " ".join(part for part in (message.text or "", describe_attachments(message)) if part).strip()
+                if not text:
+                    continue
+
                 messages.append(
                     {
                         "time": int(seconds),
                         "author": names.get(message.sender, "Участник"),
-                        "text": message.text,
+                        "text": text,
                     }
                 )
             return sorted(messages, key=lambda m: m["time"])
