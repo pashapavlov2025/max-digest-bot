@@ -52,7 +52,7 @@ def _yes_keyboard(text: str, data: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=data)]])
 
 
-def _time_keyboard() -> InlineKeyboardMarkup:
+def time_keyboard() -> InlineKeyboardMarkup:
     options = ["18:00", "20:00", "21:00", "22:00"]
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text=t, callback_data=f"time:{t}") for t in options]]
@@ -263,24 +263,71 @@ def describe_chat(chat: dict, timezone: str) -> str:
     return " · ".join(marks) or "нет данных"
 
 
-async def show_chat_picker(message: Message, state: FSMContext, chats: list[dict], header: str) -> None:
-    """Показывает пронумерованный список с приметами и кнопки-цифры под ним."""
-    shown = chats[:8]
-    await state.update_data(
-        chats={str(c["id"]): c["title"] for c in chats},
-        all_chats=chats,
-    )
+# Больше десятка вариантов человек уже не разглядывает — для остальных есть поиск
+MAX_SHOWN = 10
 
+
+def _picker_view(shown: list[dict], picked: dict[str, str], header: str):
+    """Список чатов с галочками и кнопки-номера под ним."""
     lines = [header, ""]
     for number, chat in enumerate(shown, 1):
-        lines.append(f"<b>{number}. {chat['title']}</b>\n    <i>{describe_chat(chat, config.timezone)}</i>")
+        mark = "✅ " if str(chat["id"]) in picked else ""
+        lines.append(
+            f"<b>{mark}{number}. {chat['title']}</b>\n    <i>{describe_chat(chat, config.timezone)}</i>"
+        )
 
     buttons = [
-        InlineKeyboardButton(text=str(number), callback_data=f"chat:{chat['id']}")
+        InlineKeyboardButton(
+            text=("✅ " if str(chat["id"]) in picked else "") + str(number),
+            callback_data=f"chat:{chat['id']}",
+        )
         for number, chat in enumerate(shown, 1)
     ]
-    rows = [buttons[i : i + 4] for i in range(0, len(buttons), 4)]
-    await message.answer("\n".join(lines), reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    rows = [buttons[i : i + 5] for i in range(0, len(buttons), 5)]
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=f"Готово · выбрано {len(picked)}" if picked else "Готово",
+                callback_data="chats:done",
+            )
+        ]
+    )
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def show_chat_picker(
+    message: Message,
+    state: FSMContext,
+    chats: list[dict],
+    header: str,
+    picked: dict[str, str] | None = None,
+    mode: str | None = None,
+) -> None:
+    """
+    Показывает чаты с возможностью отметить несколько.
+
+    Отмеченное живёт в состоянии диалога и переживает поиск: человек может
+    найти чат первоклассника, отметить, потом поискать секцию и отметить её же.
+    """
+    data = await state.get_data()
+    shown = chats[:MAX_SHOWN]
+    titles = {str(chat["id"]): chat["title"] for chat in chats}
+    titles.update(data.get("titles") or {})
+
+    if picked is None:
+        picked = data.get("picked") or {}
+
+    await state.update_data(
+        all_chats=data.get("all_chats") or chats,
+        shown=shown,
+        titles=titles,
+        picked=picked,
+        header=header,
+        # Поиск не должен сбрасывать, откуда пришли: из онбординга или из настроек
+        mode=mode or data.get("mode") or "onboarding",
+    )
+    text, keyboard = _picker_view(shown, picked, header)
+    await message.answer(text, reply_markup=keyboard)
 
 
 @router.message(Onboarding.chat)
@@ -301,14 +348,47 @@ async def on_chat_search(message: Message, state: FSMContext) -> None:
 
 
 @router.callback_query(F.data.startswith("chat:"))
-async def on_chat_chosen(callback: CallbackQuery, state: FSMContext) -> None:
-    await callback.answer()
-    chat_id = callback.data.split(":", 1)[1]
+async def on_chat_toggle(callback: CallbackQuery, state: FSMContext) -> None:
+    """Нажатие на номер добавляет чат в набор или убирает из него."""
     data = await state.get_data()
-    title = (data.get("chats") or {}).get(chat_id, "чат")
-    chat_id = int(chat_id)
-    db.update_user(callback.from_user.id, chat_id=chat_id, chat_title=title)
-    await callback.message.answer(texts.CHOOSE_TIME.format(title=title), reply_markup=_time_keyboard())
+    picked = dict(data.get("picked") or {})
+    key = callback.data.split(":", 1)[1]
+    title = (data.get("titles") or {}).get(key, "чат")
+
+    if key in picked:
+        picked.pop(key)
+        await callback.answer(f"Убрал «{title}»")
+    else:
+        picked[key] = title
+        await callback.answer(f"Добавил «{title}»")
+
+    await state.update_data(picked=picked)
+    text, keyboard = _picker_view(data.get("shown") or [], picked, data.get("header") or texts.CHOOSE_CHAT_AGAIN)
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard)
+    except Exception:  # noqa: BLE001 — Telegram ругается, если текст не изменился
+        pass
+
+
+@router.callback_query(F.data == "chats:done")
+async def on_chats_done(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    picked: dict[str, str] = data.get("picked") or {}
+    if not picked:
+        await callback.answer(texts.PICKED_NONE, show_alert=True)
+        return
+
+    await callback.answer()
+    db.set_chats(callback.from_user.id, [(int(key), title) for key, title in picked.items()])
+    db.log_event(callback.from_user.id, "chats_set", ", ".join(picked.values()))
+    titles = ", ".join(picked.values())
+
+    if data.get("mode") == "settings":
+        await state.clear()
+        await callback.message.answer(texts.CHATS_SAVED.format(title=titles), reply_markup=MAIN_KEYBOARD)
+        return
+
+    await callback.message.answer(texts.CHOOSE_TIME.format(title=titles), reply_markup=time_keyboard())
     await state.set_state(Onboarding.time)
 
 
@@ -316,6 +396,19 @@ async def on_chat_chosen(callback: CallbackQuery, state: FSMContext) -> None:
 async def on_time_chosen(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await _save_time(callback.from_user.id, callback.data.split(":", 1)[1], callback.message, state)
+
+
+@router.callback_query(F.data.startswith("mtime:"))
+async def on_morning_time(callback: CallbackQuery, state: FSMContext) -> None:
+    """Время утреннего напоминания — отдельной кнопкой, без диалога."""
+    await callback.answer()
+    value = callback.data.split(":", 1)[1]
+    if value == "off":
+        db.update_user(callback.from_user.id, morning=0)
+        await callback.message.answer(texts.MORNING_OFF, reply_markup=MAIN_KEYBOARD)
+        return
+    db.update_user(callback.from_user.id, morning=1, morning_time=value)
+    await callback.message.answer(texts.MORNING_ON.format(time=value), reply_markup=MAIN_KEYBOARD)
 
 
 @router.message(Onboarding.time)
@@ -332,8 +425,19 @@ async def _save_time(telegram_id: int, value: str, message: Message, state: FSMC
     normalized = f"{int(hours):02d}:{minutes}"
     db.update_user(telegram_id, digest_time=normalized, state="ready")
     user = db.get_user(telegram_id)
+
+    # Из настроек это правка одной строчки, а не завершение подключения
+    if (await state.get_data()).get("mode") == "settings":
+        await state.clear()
+        await message.answer(f"Готово, сводка теперь в {normalized}.", reply_markup=MAIN_KEYBOARD)
+        return
+
     await message.answer(
-        texts.DONE.format(time=normalized, title=user.chat_title if user else "чат"),
+        texts.DONE.format(
+            time=normalized,
+            morning=user.morning_time if user else config.default_morning_time,
+            title=user.titles if user else "чат",
+        ),
         reply_markup=MAIN_KEYBOARD,
     )
     await state.clear()

@@ -25,6 +25,9 @@ SYSTEM = """Ты — ассистент занятого родителя. Он 
 - Поздравления, спасибо, стикеры, споры ни о чём — это шум, ему место только в поле noise.
 - Не переноси в сводку чужие телефоны, адреса и прочие личные контакты: обмен ими — это шум.
 - Пустой раздел — это нормально, оставь пустой список, не придумывай наполнение.
+- Раздел tomorrow — только то, что происходит именно завтра (дату завтрашнего дня тебе дают ниже).
+  Это дублирование: то же событие может стоять и в events, и в tomorrow. Так и надо —
+  утром человек получит короткое напоминание именно об этих пунктах и больше ни о чём.
 
 Вложения. Картинки и файлы ты не видишь — вместо них в переписке стоят пометки
 в квадратных скобках: [фото], [файл «имя»], [опрос «вопрос»; варианты: ...].
@@ -39,11 +42,12 @@ JSON_SHAPE = """Ответь строго одним JSON-объектом бе�
   "actions": [{"task": "что сделать", "deadline": "до 12.09 или —", "details": "уточнение или —"}],
   "money":   [{"what": "за что", "amount": "сумма или —", "deadline": "срок или —", "recipient": "кому или —"}],
   "events":  [{"when": "дата", "what": "что происходит"}],
+  "tomorrow": [{"when": "время вроде 09:00 или —", "what": "что происходит завтра"}],
   "decisions": ["до чего договорились"],
   "unanswered": ["открытые вопросы, где ждут ответа родителей"],
   "noise": "одной строкой: о чём был остальной трёп"
 }
-Все семь ключей обязательны. Пустой список — это [], пустая строка — "—"."""
+Все восемь ключей обязательны. Пустой список — это [], пустая строка — "—"."""
 
 QUESTION_SYSTEM = """Ты отвечаешь на вопросы родителя по переписке школьного родительского чата.
 
@@ -52,7 +56,8 @@ QUESTION_SYSTEM = """Ты отвечаешь на вопросы родител�
 - В конце добавь в скобках дату сообщения-источника, например «(из чата 28.08)».
 - Никогда не пересказывай переписку списком и не приводи цитаты целиком — родитель просит ответ, а не выписку.
 - Если в чате есть только косвенно связанное — скажи, что прямого ответа нет, и коротко приведи то, что есть.
-- Если совсем ничего — «в чате про это не писали». Ничего не придумывай.
+- Если в переписке про это совсем ничего нет — ответь одним словом: НЕТ. Без пояснений и извинений.
+  Так я пойму, что этот чат можно не показывать, и не буду тревожить человека пустым ответом.
 - Чужие телефоны и адреса не приводи, если только вопрос не был именно про контакт."""
 
 EMPTY = {"—", "-", "", "нет", "не указано"}
@@ -83,9 +88,11 @@ def transcript(messages: list[dict], tz: str) -> str:
 
 async def build(messages: list[dict], hours: int, provider: str | None = None) -> dict:
     zone = ZoneInfo(config.timezone)
-    today = datetime.now(zone).strftime("%A, %d %B %Y")
+    now = datetime.now(zone)
+    today = now.strftime("%A, %d %B %Y")
+    tomorrow = (now + timedelta(days=1)).strftime("%A, %d %B %Y")
 
-    prompt = f"""Сегодня {today}.
+    prompt = f"""Сегодня {today}. Завтра {tomorrow}.
 
 Ниже переписка родительского чата за {period_label(hours)} ({len(messages)} сообщений). Сделай сводку.
 
@@ -147,6 +154,12 @@ def render(digest: dict, hours: int, message_count: int, chat_title: str | None 
         for item in digest["events"]:
             lines.append(f"• {esc(item.get('when'))} — {esc(item.get('what'))}")
 
+    if digest.get("tomorrow"):
+        lines += ["", "<b>🌅 Завтра</b>"]
+        for item in digest["tomorrow"]:
+            when = esc(item.get("when")) if _filled(item.get("when")) else ""
+            lines.append(f"• {when} — {esc(item.get('what'))}" if when else f"• {esc(item.get('what'))}")
+
     if digest.get("decisions"):
         lines += ["", "<b>✅ Решения</b>"]
         lines += [f"• {esc(item)}" for item in digest["decisions"]]
@@ -163,4 +176,38 @@ def render(digest: dict, hours: int, message_count: int, chat_title: str | None 
 
 
 def is_empty(digest: dict) -> bool:
-    return not any(digest.get(key) for key in ("actions", "money", "events", "decisions", "unanswered"))
+    return not any(
+        digest.get(key) for key in ("actions", "money", "events", "tomorrow", "decisions", "unanswered")
+    )
+
+
+# Модель отвечает этим словом, когда в переписке ответа нет, — см. QUESTION_SYSTEM
+NOTHING_FOUND = "НЕТ"
+
+
+def is_nothing(reply: str) -> bool:
+    return reply.strip().strip(".!").upper() == NOTHING_FOUND
+
+
+def tomorrow_items(digest: dict) -> list[dict]:
+    """Пункты на завтра в пригодном для хранения виде: только время и суть."""
+    items = []
+    for item in digest.get("tomorrow") or []:
+        what = str(item.get("what", "")).strip()
+        if not what:
+            continue
+        when = str(item.get("when", "")).strip()
+        items.append({"when": when if _filled(when) else "", "what": what})
+    return items
+
+
+def render_agenda(blocks: list[tuple[str, list[dict]]], single_chat: bool) -> str:
+    """Утреннее напоминание: сегодняшние пункты, собранные вчера вечером."""
+    lines = ["<b>🌅 Сегодня</b>"]
+    for title, items in blocks:
+        if not single_chat:
+            lines.append(f"\n<b>{esc(title)}</b>")
+        for item in items:
+            when = esc(item.get("when")) if _filled(item.get("when")) else ""
+            lines.append(f"• {when} — {esc(item.get('what'))}" if when else f"• {esc(item.get('what'))}")
+    return "\n".join(lines)

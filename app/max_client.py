@@ -275,3 +275,28 @@ async def fetch_window(telegram_id: int, phone: str, chat_id: int, hours: int, l
             return sorted(messages, key=lambda m: m["time"])
         finally:
             await client.close()
+
+
+async def count_recent(telegram_id: int, phone: str, chat_ids: list[int], minutes: int) -> dict[int, int]:
+    """
+    Сколько сообщений пришло в каждый чат за последние `minutes` минут.
+
+    Замер для поиска всплесков: модель не нужна, хватает одной страницы истории.
+    Если сообщений там больше сотни — вернём сотню, всплеск это всё равно докажет.
+    Все чаты обходим в одной сессии MAX: лишние входы — лишний повод для подозрений.
+    """
+    since_ms = (time.time() - minutes * 60) * 1000
+    counts: dict[int, int] = {}
+
+    with crypto.session_workdir(telegram_id) as work_dir:
+        client = Client(phone=phone, work_dir=str(work_dir))
+        await client.connect()
+        try:
+            for chat_id in chat_ids:
+                page = await client.fetch_history(chat_id=chat_id, backward=PAGE)
+                counts[chat_id] = sum(1 for m in page or [] if (m.time or 0) >= since_ms)
+                await asyncio.sleep(0.3)
+        finally:
+            await client.close()
+
+    return counts
