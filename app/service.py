@@ -77,7 +77,8 @@ async def _digest_chat(
     # Иначе сломанная модель каждый день считалась бы первым сбоем и каждый день
     # об этом сообщала.
     db.note_success(user.telegram_id)
-    _remember_tomorrow(user, chat, result)
+    result["tomorrow"] = await _tomorrow_with_memory(user, chat, result)
+    await _remember(user, chat, result)
 
     # Тихий день не тревожим уведомлением: смысл сервиса в экономии внимания
     if quiet_if_empty and digest.is_empty(result) and len(messages) < 5:
@@ -90,26 +91,90 @@ async def _digest_chat(
     return True
 
 
-def _remember_tomorrow(user: db.User, chat: db.Chat, result: dict) -> None:
-    """Откладывает завтрашние пункты, чтобы утром напомнить о них ещё раз."""
-    items = digest.tomorrow_items(result)
-    if not items:
-        return
+def _tomorrow(zone: ZoneInfo) -> str:
+    return (datetime.now(zone) + timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+async def _tomorrow_with_memory(user: db.User, chat: db.Chat, result: dict) -> list[dict]:
+    """
+    Блок «завтра» пополняется тем, что бот запомнил раньше.
+
+    В живом чате про поднятие флага сказали один раз за десять дней до него.
+    Сводка за сутки такое не увидит — она читает только вчерашнюю переписку.
+    Календарь видит, поэтому накануне событие всё равно всплывёт.
+    """
     zone = ZoneInfo(config.timezone)
-    on_date = (datetime.now(zone) + timedelta(days=1)).strftime("%Y-%m-%d")
-    db.save_agenda(user.telegram_id, chat.chat_id, chat.title, on_date, items)
+    remembered = [
+        {"when": item["when"], "what": item["what"]}
+        for item in db.calendar_on(user.telegram_id, _tomorrow(zone), chat.chat_id)
+    ]
+    items = digest.tomorrow_items(result) + remembered
+    if not items:
+        return []
+    return await digest.merge(items, provider=user.llm_provider)
+
+
+async def _remember(user: db.User, chat: db.Chat, result: dict) -> None:
+    """
+    Складывает события в календарь, сводя каждую дату к итоговому плану.
+
+    Склеиваем при записи, а не при чтении: иначе календарь копит формулировки.
+    За неделю живого чата про линейку 1 сентября набралось одиннадцать строк —
+    каждый день своими словами, и ключ по тексту такие повторы не ловит.
+    """
+    zone = ZoneInfo(config.timezone)
+    tomorrow = _tomorrow(zone)
+
+    fresh: dict[str, list[dict]] = {}
+    for item in digest.dated_events(result):
+        fresh.setdefault(item["date"], []).append({"when": item["time"], "what": item["what"]})
+    for item in result.get("tomorrow") or []:
+        fresh.setdefault(tomorrow, []).append({"when": item.get("when", ""), "what": item["what"]})
+
+    for on_date, items in fresh.items():
+        known = [
+            {"when": row["when"], "what": row["what"]}
+            for row in db.calendar_on(user.telegram_id, on_date, chat.chat_id)
+        ]
+        # Сводим всегда, когда строк больше одной. Дублировать друг друга успевают
+        # и разделы одной сводки: событие с датой и пункт «на завтра» — это часто
+        # одно и то же, записанное дважды.
+        combined = items + known
+        plan = await digest.merge(combined, provider=user.llm_provider) if len(combined) > 1 else combined
+        db.replace_calendar(
+            user.telegram_id,
+            chat.chat_id,
+            on_date,
+            [{"time": entry.get("when", ""), "what": entry["what"]} for entry in plan],
+        )
+    if fresh:
+        log.info("в календарь %s: дат %s", user.telegram_id, len(fresh))
 
 
 async def send_morning(bot: Bot, user: db.User) -> bool:
-    """Утреннее напоминание о том, что запланировано на сегодня."""
+    """
+    Утреннее напоминание о том, что запланировано на сегодня.
+
+    Берётся из календаря, а не из вчерашней сводки: про часть событий
+    в чате писали неделю назад и с тех пор молчат.
+    """
     zone = ZoneInfo(config.timezone)
     today = datetime.now(zone).strftime("%Y-%m-%d")
-    blocks = db.agenda_for(user.telegram_id, today)
-    if not blocks:
+    rows = db.calendar_on(user.telegram_id, today)
+    if not rows:
+        db.update_user(user.telegram_id, last_morning=today)
         return False
 
+    by_chat: dict[str, list[dict]] = {}
+    for row in rows:
+        by_chat.setdefault(row["title"], []).append({"when": row["when"], "what": row["what"]})
+
+    blocks = [
+        (title, await digest.merge(items, provider=user.llm_provider))
+        for title, items in by_chat.items()
+    ]
     await send_long(bot, user.telegram_id, digest.render_agenda(blocks, single_chat=len(user.chats) == 1))
-    db.mark_agenda_sent(user.telegram_id, today)
+    db.update_user(user.telegram_id, last_morning=today)
     db.log_event(user.telegram_id, "morning_sent", f"{sum(len(items) for _, items in blocks)} пунктов")
     return True
 
@@ -225,17 +290,29 @@ async def notify_admins(bot: Bot, text: str) -> None:
             log.warning("не смог уведомить админа %s: %s", admin_id, exc)
 
 
+# Начиная с этой заполненности предпочитаем разрезать по началу раздела
+SECTION_FILL = 0.7
+
+
 async def send_long(bot: Bot, chat_id: int, text: str) -> None:
-    """Telegram не принимает больше 4096 символов — режем по строкам."""
+    """
+    Telegram не принимает больше 4096 символов — режем по строкам.
+
+    Режем по возможности на границе раздела, а не посреди списка: сводка
+    за неделю в лимит не влезает, и разрыв между «Наглядной геометрией»
+    и заголовком «Решения» выглядит поломкой, а не длинным сообщением.
+    """
     if len(text) <= LIMIT:
         await bot.send_message(chat_id, text)
         return
 
     chunk = ""
     for line in text.split("\n"):
-        if len(chunk) + len(line) + 1 > LIMIT:
-            await bot.send_message(chat_id, chunk)
+        overflow = len(chunk) + len(line) + 1 > LIMIT
+        section = line.startswith("<b>") and len(chunk) > LIMIT * SECTION_FILL
+        if chunk and (overflow or section):
+            await bot.send_message(chat_id, chunk.strip())
             chunk = ""
         chunk += ("\n" if chunk else "") + line
-    if chunk:
-        await bot.send_message(chat_id, chunk)
+    if chunk.strip():
+        await bot.send_message(chat_id, chunk.strip())

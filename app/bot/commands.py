@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
-from .. import crypto, db, max_client, service
+from .. import crypto, db, digest, max_client, service
 from .handlers import Onboarding, show_chat_picker, time_keyboard
 from ..config import config
 from . import texts
@@ -115,6 +115,30 @@ async def on_question(message: Message, command: CommandObject) -> None:
 
     await message.answer(texts.WORKING)
     await service.answer_question(message.bot, user, question)
+
+
+@router.message(F.text == texts.BUTTON_PLAN)
+async def on_button_plan(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await on_plan(message)
+
+
+@router.message(Command("plan"))
+async def on_plan(message: Message) -> None:
+    """Что бот запомнил на ближайшие две недели."""
+    user = _require_user(message)
+    if user is None:
+        await message.answer(texts.NOT_REGISTERED)
+        return
+
+    rows = db.calendar_ahead(user.telegram_id)
+    if not rows:
+        await message.answer(texts.PLAN_EMPTY, reply_markup=MAIN_KEYBOARD)
+        return
+
+    await service.send_long(
+        message.bot, message.chat.id, digest.render_ahead(rows, single_chat=len(user.chats) == 1)
+    )
 
 
 @router.message(Command("settings"))

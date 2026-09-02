@@ -47,7 +47,14 @@ async def _timetable(bot: Bot) -> None:
                     done[(user.telegram_id, "digest")] = today
                     _spawn("сводка", user, service.send_digest(bot, user, hours=24, quiet_if_empty=True))
 
-                if user.morning and user.morning_time == stamp and done.get((user.telegram_id, "morning")) != today:
+                # Отметка об утреннем сообщении лежит в базе: перезапуск бота
+                # не должен превращаться во второе напоминание за то же утро
+                if (
+                    user.morning
+                    and user.morning_time == stamp
+                    and user.last_morning != today
+                    and done.get((user.telegram_id, "morning")) != today
+                ):
                     done[(user.telegram_id, "morning")] = today
                     _spawn("утреннее напоминание", user, service.send_morning(bot, user))
         except Exception as exc:  # noqa: BLE001

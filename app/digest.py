@@ -6,7 +6,8 @@
 """
 
 import html
-from datetime import datetime, timedelta, timezone
+import re
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from . import llm
@@ -20,10 +21,14 @@ SYSTEM = """Ты — ассистент занятого родителя. Он 
 - Пиши по-русски, коротко, без воды и без вежливых вступлений.
 - Никогда не выдумывай факты, суммы и даты. Если чего-то нет в переписке — ставь «—».
 - Относительные даты («в пятницу», «завтра») переводи в конкретные числа, опираясь на текущую дату.
+- В events поле date — строго вида ГГГГ-ММ-ДД. Если известен только месяц, поставь первое число этого месяца. Если даже месяц не назван, событию в events не место.
+- Год определяй по учебному году, а не по календарному: он идёт с сентября по июнь. Если названный месяц в текущем году уже прошёл, речь о следующем годе. В сентябре 2026 «срез в апреле» — это апрель 2027, а не апрель 2026.
+- Не выдумывай событий-заглушек. Если из переписки понятно, что задание есть, но какое — неизвестно, событию в events не место.
+- В events поле time — только если время названо в переписке, вида ЧЧ:ММ. «После уроков» и «во второй половине дня» — это не время, ставь «—».
 - Если несколько сообщений про одно и то же — объединяй в один пункт.
 - Отменённое или изменённое позже по ходу переписки указывай в итоговом, актуальном виде.
 - Поздравления, спасибо, стикеры, споры ни о чём — это шум, ему место только в поле noise.
-- Не переноси в сводку чужие телефоны, адреса и прочие личные контакты: обмен ими — это шум.
+- Чужие телефоны, адреса и прочие личные контакты в сводку не переноси: обмен ими — это шум. Единственное исключение — реквизиты для оплаты: если деньги переводят по номеру телефона или карты, номер нужен, без него поручение невыполнимо.
 - Пустой раздел — это нормально, оставь пустой список, не придумывай наполнение.
 - Раздел tomorrow — только то, что происходит именно завтра (дату завтрашнего дня тебе дают ниже).
   Это дублирование: то же событие может стоять и в events, и в tomorrow. Так и надо —
@@ -43,7 +48,7 @@ JSON_SHAPE = """Ответь строго одним JSON-объектом бе�
   "headline": "одна строка — главное за период",
   "actions": [{"task": "что сделать", "deadline": "до 12.09 или —", "details": "уточнение или —"}],
   "money":   [{"what": "за что", "amount": "сумма или —", "deadline": "срок или —", "recipient": "кому или —"}],
-  "events":  [{"when": "дата", "what": "что происходит"}],
+  "events":  [{"date": "2026-09-07", "time": "09:00 или —", "what": "что происходит"}],
   "tomorrow": [{"when": "время вроде 09:00 или —", "what": "что происходит завтра"}],
   "decisions": ["до чего договорились"],
   "unanswered": ["открытые вопросы, где ждут ответа родителей"],
@@ -94,7 +99,7 @@ async def build(messages: list[dict], hours: int, provider: str | None = None) -
     today = now.strftime("%A, %d %B %Y")
     tomorrow = (now + timedelta(days=1)).strftime("%A, %d %B %Y")
 
-    prompt = f"""Сегодня {today}. Завтра {tomorrow}.
+    prompt = f"""Сегодня {today} ({now:%Y-%m-%d}). Завтра {tomorrow} ({now + timedelta(days=1):%Y-%m-%d}).
 
 Ниже переписка родительского чата за {period_label(hours)} ({len(messages)} сообщений). Сделай сводку.
 
@@ -154,7 +159,10 @@ def render(digest: dict, hours: int, message_count: int, chat_title: str | None 
     if digest.get("events"):
         lines += ["", "<b>📅 Даты и события</b>"]
         for item in digest["events"]:
-            lines.append(f"• {esc(item.get('when'))} — {esc(item.get('what'))}")
+            stamp = human_date(item.get("date")) or esc(item.get("when", ""))
+            if _filled(item.get("time")):
+                stamp = f"{stamp} {esc(item['time'])}" if stamp else esc(item["time"])
+            lines.append(f"• {stamp} — {esc(item.get('what'))}" if stamp else f"• {esc(item.get('what'))}")
 
     if digest.get("tomorrow"):
         lines += ["", "<b>🌅 Завтра</b>"]
@@ -212,4 +220,141 @@ def render_agenda(blocks: list[tuple[str, list[dict]]], single_chat: bool) -> st
         for item in items:
             when = esc(item.get("when")) if _filled(item.get("when")) else ""
             lines.append(f"• {when} — {esc(item.get('what'))}" if when else f"• {esc(item.get('what'))}")
+    return "\n".join(lines)
+
+
+DAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+
+
+def human_date(value: object) -> str:
+    """2026-09-07 → «07.09 (пн)». Год дописываем, когда он не нынешний."""
+    parsed = parse_date(value)
+    if not parsed:
+        return ""
+    today = datetime.now(ZoneInfo(config.timezone)).date()
+    stamp = f"{parsed:%d.%m}" if parsed.year == today.year else f"{parsed:%d.%m.%Y}"
+    return f"{stamp} ({DAYS[parsed.weekday()]})"
+
+
+def parse_date(value: object) -> date | None:
+    try:
+        return date.fromisoformat(str(value).strip()[:10])
+    except (ValueError, TypeError):
+        return None
+
+
+# Заглушки вроде «… (ДЗ есть, продолжение обрезано)» модель иногда выдаёт вместо
+# признания, что содержания не знает. В календаре им делать нечего.
+STUB = re.compile(r"^[…\.\s]*$|обрезан|неизвестн|уточн[ия]ть у|не указан")
+
+
+def dated_events(digest: dict) -> list[dict]:
+    """События с разобранной датой — только они годятся для календаря."""
+    today = datetime.now(ZoneInfo(config.timezone)).date()
+    items = []
+    for item in digest.get("events") or []:
+        parsed = parse_date(item.get("date"))
+        what = str(item.get("what", "")).strip()
+        if not parsed or not what or len(what) < 6 or STUB.search(what.lower()):
+            continue
+
+        # Модель путает учебный год с календарным: «срез в апреле», сказанное
+        # в сентябре, приезжает апрелем этого года, то есть в прошлое
+        if (today - parsed).days > 30:
+            try:
+                parsed = parsed.replace(year=parsed.year + 1)
+            except ValueError:  # 29 февраля
+                continue
+        moment = str(item.get("time", "")).strip()
+        items.append(
+            {
+                "date": parsed.isoformat(),
+                "time": moment if re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", moment) else "",
+                "what": what,
+            }
+        )
+    return items
+
+
+MERGE_SYSTEM = """Тебе дают всё, что чат насобирал про один день: пункты из сообщений за разные дни. Про одно событие в чате пишут по нескольку раз — уточняют время, добавляют подробности, иногда меняют решение на противоположное.
+
+Составь из этого короткий итоговый план на день.
+
+- Одно событие — один пункт. Если несколько строк про одно и то же, собери их детали в один пункт, а не выбирай одну из формулировок.
+- Приход в школу, начало мероприятия и его окончание в один день — это одно событие, а не три. Возьми время начала.
+- Если строки противоречат друг другу, верна поздняя: детали в чате уточняют, а не отменяют задним числом.
+- Время ставь самое точное из известных. Если ни в одной строке времени нет — оставь пустым.
+- Пунктов должно быть не больше шести. Если получается больше, значит ты недостаточно склеил.
+- Каждый пункт — одна короткая строка, до ста двадцати знаков. Это утреннее напоминание, его читают на бегу.
+- Оставляй то, что меняет действия родителя: время, место, что взять с собой, кого касается. Подробности организации, от которых родителю ничего не нужно делать, выбрасывай.
+- Того, чего нет во входных строках, не добавляй.
+
+Ответь строго одним JSON-объектом: {"items": [{"when": "09:00 или пустая строка", "what": "что происходит"}]}"""
+
+
+async def merge(items: list[dict], provider: str | None = None) -> list[dict]:
+    """
+    Склеивает дубли в списке на один день.
+
+    Нужна потому, что событие живёт в переписке неделю: линейку 1 сентября
+    в живом чате записали четыре раза разными словами за четыре дня. Без
+    склейки человек получит четыре строки об одном и том же.
+    """
+    if len(items) < 2:
+        return items
+
+    listing = "\n".join(f"- {item.get('when') or 'без времени'}: {item.get('what')}" for item in items)
+    try:
+        raw = await llm.complete(MERGE_SYSTEM, listing, json_mode=True, provider=provider)
+        merged = llm.extract_json(raw).get("items")
+    except Exception:  # noqa: BLE001 — склейка не стоит того, чтобы терять сводку
+        merged = None
+
+    if not merged:
+        # Запасной вариант: гасим хотя бы дословные совпадения
+        seen, plain = set(), []
+        for item in items:
+            key = " ".join(str(item.get("what", "")).lower().split())[:80]
+            if key not in seen:
+                seen.add(key)
+                plain.append(item)
+        return plain
+
+    return [
+        {"when": str(item.get("when", "")).strip(), "what": str(item.get("what", "")).strip()}
+        for item in merged
+        if str(item.get("what", "")).strip()
+    ]
+
+
+def render_ahead(rows: list[dict], single_chat: bool) -> str:
+    """
+    Что записано на ближайшие дни.
+
+    Рядом с давними записями ставим, когда о них писали: если про событие
+    сказали неделю назад и с тех пор молчат, это стоит знать.
+    """
+    lines = ["<b>🔭 Что впереди</b>"]
+    current = None
+    today = datetime.now(ZoneInfo(config.timezone)).date()
+
+    for row in rows:
+        if row["date"] != current:
+            current = row["date"]
+            parsed = parse_date(current)
+            mark = human_date(current)
+            if parsed == today:
+                mark += " — сегодня"
+            elif parsed and (parsed - today).days == 1:
+                mark += " — завтра"
+            lines += ["", f"<b>{mark}</b>"]
+
+        head = f"{esc(row['when'])} — " if row["when"] else ""
+        tail = ""
+        seen = parse_date((row.get("first_seen") or "")[:10])
+        if seen and (today - seen).days >= 3:
+            tail = f" <i>(писали {seen:%d.%m})</i>"
+        chat = f" <i>· {esc(row['title'])}</i>" if not single_chat else ""
+        lines.append(f"• {head}{esc(row['what'])}{chat}{tail}")
+
     return "\n".join(lines)

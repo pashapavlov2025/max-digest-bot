@@ -34,6 +34,7 @@ async def main() -> None:
     await bot.set_my_commands([
         BotCommand(command="summary", description="Сводка за сутки"),
         BotCommand(command="q", description="Найти ответ в переписке"),
+        BotCommand(command="plan", description="Что впереди: события с датами"),
         BotCommand(command="settings", description="Время сводки, чат, пауза"),
         BotCommand(command="help", description="Что я умею"),
         BotCommand(command="stop", description="Удалить мои данные"),

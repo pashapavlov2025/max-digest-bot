@@ -57,6 +57,19 @@ CREATE TABLE IF NOT EXISTS activity (
 );
 CREATE INDEX IF NOT EXISTS activity_lookup ON activity (telegram_id, chat_id, at);
 
+-- События с машинной датой. Живут дольше суток: в чате про поднятие флага
+-- сказали один раз за десять дней до, и без этой таблицы оно теряется.
+CREATE TABLE IF NOT EXISTS calendar (
+    telegram_id INTEGER NOT NULL,
+    chat_id     INTEGER NOT NULL,
+    on_date     TEXT NOT NULL,      -- YYYY-MM-DD
+    at_time     TEXT,               -- HH:MM или NULL, если время не назвали
+    what        TEXT NOT NULL,
+    key         TEXT NOT NULL,      -- нормализованный текст: гасит дословные повторы
+    first_seen  TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (telegram_id, chat_id, on_date, key)
+);
+
 -- Описания фотографий: одна и та же картинка попадает в несколько сводок
 CREATE TABLE IF NOT EXISTS photo_notes (
     photo_id INTEGER PRIMARY KEY,
@@ -90,6 +103,7 @@ LATER_COLUMNS = {
     "last_error": "TEXT",
     "last_error_at": "TEXT",
     "last_burst_at": "TEXT",
+    "last_morning": "TEXT",
 }
 
 
@@ -114,6 +128,7 @@ class User:
     failures: int
     last_error: str | None
     last_burst_at: str | None
+    last_morning: str | None
     chats: list[Chat] = field(default_factory=list)
 
     @property
@@ -145,6 +160,9 @@ def init() -> None:
             if name not in existing:
                 conn.execute(f"ALTER TABLE users ADD COLUMN {name} {definition}")
 
+        _migrate_agenda(conn)
+        _repair_keys(conn)
+
         # Переезд с одного чата на список: старую привязку переносим как есть
         conn.execute(
             """
@@ -152,6 +170,61 @@ def init() -> None:
             SELECT telegram_id, chat_id, chat_title FROM users WHERE chat_id IS NOT NULL
             """
         )
+
+
+def _key(what: str) -> str:
+    """Нормализованный текст события. Гасит дословные повторы одной формулировки."""
+    letters = "".join(ch.lower() for ch in what if ch.isalnum() or ch.isspace())
+    return " ".join(letters.split())[:80]
+
+
+def _migrate_agenda(conn: sqlite3.Connection) -> None:
+    """
+    Повестка на завтра переехала в календарь: там у события есть настоящая дата.
+
+    После переноса таблицу опустошаем. Иначе перенос повторяется при каждом
+    запуске и возвращает в календарь формулировки, которые склейка уже заменила
+    на более полные, — при каждом перезапуске бота календарь заново пухнет.
+    """
+    try:
+        rows = conn.execute("SELECT telegram_id, chat_id, on_date, items FROM agenda").fetchall()
+    except sqlite3.OperationalError:
+        return
+
+    for row in rows:
+        for item in json.loads(row["items"]):
+            what = str(item.get("what", "")).strip()
+            if not what:
+                continue
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO calendar (telegram_id, chat_id, on_date, at_time, what, key)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (row["telegram_id"], row["chat_id"], row["on_date"],
+                 item.get("when") or None, what, _key(what)),
+            )
+
+    if rows:
+        conn.execute("DELETE FROM agenda")
+
+
+def _repair_keys(conn: sqlite3.Connection) -> None:
+    """
+    Приводит ключи к нормальному виду.
+
+    Первая версия миграции считала ключ на SQL, а lower() в SQLite умеет только
+    латиницу — кириллица оставалась как есть, и «Математика, каб. 8» не совпадала
+    сама с собой. Пересчитываем в Python; строки, схлопнувшиеся в один ключ, — дубли.
+    """
+    for row in conn.execute("SELECT rowid, what, key FROM calendar").fetchall():
+        proper = _key(row["what"])
+        if proper == row["key"]:
+            continue
+        try:
+            conn.execute("UPDATE calendar SET key = ? WHERE rowid = ?", (proper, row["rowid"]))
+        except sqlite3.IntegrityError:
+            conn.execute("DELETE FROM calendar WHERE rowid = ?", (row["rowid"],))
 
 
 def _chats_of(conn: sqlite3.Connection, telegram_id: int) -> list[Chat]:
@@ -178,6 +251,7 @@ def _to_user(conn: sqlite3.Connection, row: sqlite3.Row) -> User:
         failures=row["failures"] or 0,
         last_error=row["last_error"],
         last_burst_at=row["last_burst_at"],
+        last_morning=row["last_morning"],
         chats=_chats_of(conn, row["telegram_id"]),
     )
 
@@ -212,7 +286,7 @@ def update_user(telegram_id: int, **fields) -> None:
 
 def delete_user(telegram_id: int) -> None:
     with connect() as conn:
-        for table in ("users", "user_chats", "agenda", "activity"):
+        for table in ("users", "user_chats", "agenda", "calendar", "activity"):
             conn.execute(f"DELETE FROM {table} WHERE telegram_id = ?", (telegram_id,))
 
 
@@ -258,7 +332,8 @@ def remove_chat(telegram_id: int, chat_id: int) -> None:
         conn.execute(
             "DELETE FROM user_chats WHERE telegram_id = ? AND chat_id = ?", (telegram_id, chat_id)
         )
-        conn.execute("DELETE FROM agenda WHERE telegram_id = ? AND chat_id = ?", (telegram_id, chat_id))
+        for table in ("agenda", "calendar"):
+            conn.execute(f"DELETE FROM {table} WHERE telegram_id = ? AND chat_id = ?", (telegram_id, chat_id))
 
 
 # --- Живучесть: чиним не молча ---
@@ -288,39 +363,152 @@ def note_success(telegram_id: int) -> None:
         )
 
 
-# --- Завтрашние дела ---
+# --- Календарь: события с датой ---
 
 
-def save_agenda(telegram_id: int, chat_id: int, chat_title: str, on_date: str, items: list[dict]) -> None:
-    """Кладёт список дел на дату. Повторная сводка за тот же день перезаписывает."""
-    if not items:
-        return
+def save_calendar(telegram_id: int, chat_id: int, items: list[dict]) -> int:
+    """
+    Кладёт события в календарь.
+
+    Повторное упоминание того же события обновляет формулировку и время:
+    в чате детали уточняют несколько дней подряд, и верна последняя версия.
+    Дату первого упоминания при этом сохраняем — по ней видно, что про
+    событие сказали давно и с тех пор молчат.
+    """
+    rows = [
+        (telegram_id, chat_id, item["date"], item.get("time") or None, item["what"], _key(item["what"]))
+        for item in items
+        if item.get("date") and item.get("what")
+    ]
+    if not rows:
+        return 0
+
     with connect() as conn:
-        conn.execute(
+        conn.executemany(
             """
-            INSERT OR REPLACE INTO agenda (telegram_id, chat_id, on_date, chat_title, items, sent)
-            VALUES (?, ?, ?, ?, ?, 0)
+            INSERT INTO calendar (telegram_id, chat_id, on_date, at_time, what, key)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (telegram_id, chat_id, on_date, key)
+            DO UPDATE SET at_time = excluded.at_time, what = excluded.what
             """,
-            (telegram_id, chat_id, on_date, chat_title, json.dumps(items, ensure_ascii=False)),
+            rows,
+        )
+        conn.execute("DELETE FROM calendar WHERE on_date < date('now', '-60 days')")
+    return len(rows)
+
+
+def replace_calendar(telegram_id: int, chat_id: int, on_date: str, items: list[dict]) -> None:
+    """
+    Заменяет всё, что известно про эту дату, склеенным списком.
+
+    Иначе календарь копит: каждый день чат пишет про линейку своими словами,
+    ключ получается новый, и к первому сентября набирается одиннадцать строк
+    про одно утро. Дату первого упоминания переносим — она про событие,
+    а не про формулировку.
+    """
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT MIN(first_seen) AS born FROM calendar WHERE telegram_id = ? AND chat_id = ? AND on_date = ?",
+            (telegram_id, chat_id, on_date),
+        ).fetchone()
+        born = row["born"] if row and row["born"] else None
+
+        conn.execute(
+            "DELETE FROM calendar WHERE telegram_id = ? AND chat_id = ? AND on_date = ?",
+            (telegram_id, chat_id, on_date),
+        )
+        conn.executemany(
+            """
+            INSERT OR REPLACE INTO calendar (telegram_id, chat_id, on_date, at_time, what, key, first_seen)
+            VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')))
+            """,
+            [
+                (telegram_id, chat_id, on_date, item.get("time") or None,
+                 item["what"], _key(item["what"]), born)
+                for item in items
+                if item.get("what")
+            ],
         )
 
 
-def agenda_for(telegram_id: int, on_date: str) -> list[tuple[str, list[dict]]]:
+def calendar_on(telegram_id: int, on_date: str, chat_id: int | None = None) -> list[dict]:
+    """События на дату. Без chat_id — по всем чатам сразу, с названиями."""
+    query = """
+        SELECT c.chat_id, c.at_time, c.what, c.first_seen, u.chat_title
+          FROM calendar c
+          LEFT JOIN user_chats u ON u.telegram_id = c.telegram_id AND u.chat_id = c.chat_id
+         WHERE c.telegram_id = ? AND c.on_date = ?
+    """
+    params: list = [telegram_id, on_date]
+    if chat_id is not None:
+        query += " AND c.chat_id = ?"
+        params.append(chat_id)
+
+    with connect() as conn:
+        return [
+            {
+                "chat_id": row["chat_id"],
+                "title": row["chat_title"] or "чат",
+                "when": row["at_time"] or "",
+                "what": row["what"],
+                "first_seen": row["first_seen"],
+            }
+            for row in conn.execute(query + " ORDER BY c.at_time IS NULL, c.at_time", params)
+        ]
+
+
+def calendar_ahead(telegram_id: int, days: int = 14) -> list[dict]:
+    """Всё, что записано на ближайшие дни, начиная с сегодня."""
     with connect() as conn:
         rows = conn.execute(
-            "SELECT chat_title, items FROM agenda WHERE telegram_id = ? AND on_date = ? AND sent = 0",
-            (telegram_id, on_date),
+            """
+            SELECT c.on_date, c.at_time, c.what, c.first_seen, u.chat_title
+              FROM calendar c
+              LEFT JOIN user_chats u ON u.telegram_id = c.telegram_id AND u.chat_id = c.chat_id
+             WHERE c.telegram_id = ?
+               AND c.on_date >= date('now')
+               AND c.on_date <= date('now', ?)
+             ORDER BY c.on_date, c.at_time IS NULL, c.at_time
+            """,
+            (telegram_id, f"+{days} days"),
         ).fetchall()
-        return [(row["chat_title"] or "чат", json.loads(row["items"])) for row in rows]
+    return [
+        {
+            "date": row["on_date"],
+            "when": row["at_time"] or "",
+            "what": row["what"],
+            "title": row["chat_title"] or "чат",
+            "first_seen": row["first_seen"],
+        }
+        for row in rows
+    ]
 
 
-def mark_agenda_sent(telegram_id: int, on_date: str) -> None:
+# --- Замеры активности ---def calendar_ahead(telegram_id: int, days: int = 14) -> list[dict]:
+    """Всё, что записано на ближайшие дни, начиная с сегодня."""
     with connect() as conn:
-        conn.execute(
-            "UPDATE agenda SET sent = 1 WHERE telegram_id = ? AND on_date = ?", (telegram_id, on_date)
-        )
-        # Позавчерашние планы никому не нужны
-        conn.execute("DELETE FROM agenda WHERE on_date < date('now', '-3 days')")
+        rows = conn.execute(
+            """
+            SELECT c.on_date, c.at_time, c.what, c.first_seen, u.chat_title
+              FROM calendar c
+              LEFT JOIN user_chats u ON u.telegram_id = c.telegram_id AND u.chat_id = c.chat_id
+             WHERE c.telegram_id = ?
+               AND c.on_date >= date('now')
+               AND c.on_date <= date('now', ?)
+             ORDER BY c.on_date, c.at_time IS NULL, c.at_time
+            """,
+            (telegram_id, f"+{days} days"),
+        ).fetchall()
+    return [
+        {
+            "date": row["on_date"],
+            "when": row["at_time"] or "",
+            "what": row["what"],
+            "title": row["chat_title"] or "чат",
+            "first_seen": row["first_seen"],
+        }
+        for row in rows
+    ]
 
 
 # --- Замеры активности ---
