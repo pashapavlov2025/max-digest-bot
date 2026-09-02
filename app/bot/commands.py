@@ -6,15 +6,72 @@ import secrets
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .. import crypto, db, max_client, service
 from .handlers import Onboarding, show_chat_picker
 from ..config import config
 from . import texts
+from .keyboards import MAIN as MAIN_KEYBOARD
 
 log = logging.getLogger(__name__)
 router = Router()
+
+
+class Asking(StatesGroup):
+    question = State()
+
+
+async def make_digest(message: Message, days: int) -> None:
+    user = _require_user(message)
+    if user is None:
+        await message.answer(texts.NOT_REGISTERED)
+        return
+    await message.answer(texts.WORKING, reply_markup=MAIN_KEYBOARD)
+    await service.send_digest(message.bot, user, hours=days * 24)
+
+
+@router.message(F.text == texts.BUTTON_DAY)
+async def on_button_day(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await make_digest(message, 1)
+
+
+@router.message(F.text == texts.BUTTON_THREE)
+async def on_button_three(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await make_digest(message, 3)
+
+
+@router.message(F.text == texts.BUTTON_ASK)
+async def on_button_ask(message: Message, state: FSMContext) -> None:
+    if _require_user(message) is None:
+        await message.answer(texts.NOT_REGISTERED)
+        return
+    await message.answer(texts.ASK_QUESTION)
+    await state.set_state(Asking.question)
+
+
+@router.message(Asking.question)
+async def on_free_question(message: Message, state: FSMContext) -> None:
+    """Вопрос, заданный обычным текстом после нажатия кнопки."""
+    await state.clear()
+    user = _require_user(message)
+    if user is None:
+        await message.answer(texts.NOT_REGISTERED)
+        return
+    question = (message.text or "").strip()
+    if not question:
+        return
+    await message.answer(texts.WORKING, reply_markup=MAIN_KEYBOARD)
+    await service.answer_question(message.bot, user, question)
+
+
+@router.message(F.text == texts.BUTTON_SETTINGS)
+async def on_button_settings(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await on_settings(message)
 
 
 def _require_user(message: Message) -> db.User | None:
@@ -24,7 +81,8 @@ def _require_user(message: Message) -> db.User | None:
 
 @router.message(Command("help"))
 async def on_help(message: Message) -> None:
-    await message.answer(texts.HELP)
+    keyboard = MAIN_KEYBOARD if _require_user(message) else None
+    await message.answer(texts.HELP, reply_markup=keyboard)
 
 
 @router.message(Command("summary"))
@@ -136,7 +194,12 @@ async def on_invite(message: Message) -> None:
         return
     code = secrets.token_hex(4)
     db.add_invite(code, message.from_user.id)
-    await message.answer(f"Код приглашения: <code>{code}</code>")
+    me = await message.bot.get_me()
+    link = f"https://t.me/{me.username}?start={code}"
+    await message.answer(
+        f"Ссылка-приглашение, отправьте её другу:\n\n{link}\n\n"
+        f"Она одноразовая. Если ссылки не работают, код можно ввести вручную: <code>{code}</code>"
+    )
 
 
 @router.message(Command("users"))

@@ -9,7 +9,7 @@ import tempfile
 from pathlib import Path
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from datetime import datetime
@@ -28,6 +28,7 @@ from aiogram.types import (
 from .. import crypto, db, digest, max_client
 from ..config import config
 from . import texts
+from .keyboards import MAIN as MAIN_KEYBOARD
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -71,16 +72,26 @@ async def _cleanup_login(telegram_id: int) -> None:
 
 
 @router.message(CommandStart())
-async def on_start(message: Message, state: FSMContext) -> None:
+async def on_start(message: Message, state: FSMContext, command: CommandObject) -> None:
     await state.clear()
     await _cleanup_login(message.from_user.id)
 
     user = db.get_user(message.from_user.id)
     if user and user.is_ready:
-        await message.answer(texts.HELP)
+        await message.answer(texts.HELP, reply_markup=MAIN_KEYBOARD)
         return
 
     if user is None:
+        # Приглашение обычно приходит ссылкой t.me/бот?start=код — код тогда уже здесь
+        code = (command.args or "").strip()
+        if code and db.use_invite(code, message.from_user.id):
+            db.create_user(message.from_user.id, message.from_user.username)
+            db.log_event(message.from_user.id, "invite_used", code)
+            await message.answer(texts.WELCOME)
+            await message.answer(texts.NEED_PASSWORD, reply_markup=_yes_keyboard("Пароль установил", "pw:done"))
+            await state.set_state(Onboarding.password_hint)
+            return
+
         await message.answer(texts.START_LOCKED)
         await state.set_state(Onboarding.invite)
         return
@@ -321,5 +332,8 @@ async def _save_time(telegram_id: int, value: str, message: Message, state: FSMC
     normalized = f"{int(hours):02d}:{minutes}"
     db.update_user(telegram_id, digest_time=normalized, state="ready")
     user = db.get_user(telegram_id)
-    await message.answer(texts.DONE.format(time=normalized, title=user.chat_title if user else "чат"))
+    await message.answer(
+        texts.DONE.format(time=normalized, title=user.chat_title if user else "чат"),
+        reply_markup=MAIN_KEYBOARD,
+    )
     await state.clear()
