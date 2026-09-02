@@ -75,6 +75,23 @@ class Config:
     def gigachat_model(self) -> str:
         return os.environ.get("GIGACHAT_MODEL", "GigaChat-2-Max")
 
+    # --- Чтение фотографий ---
+    # Только те, у которых есть подпись или рядом задан вопрос: сплошное чтение
+    # по замеру уходит на букеты и снимки с праздника.
+
+    @property
+    def vision_enabled(self) -> bool:
+        return os.environ.get("VISION_ENABLED", "1") in {"1", "true", "yes"}
+
+    @property
+    def vision_model(self) -> str:
+        return os.environ.get("VISION_MODEL", "kimi-k2.6")
+
+    # Потолок на одну сводку: каждая картинка — это ещё десяток секунд ожидания
+    @property
+    def vision_max_photos(self) -> int:
+        return int(os.environ.get("VISION_MAX_PHOTOS", "6"))
+
     # --- Поведение ---
     @property
     def timezone(self) -> str:

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from pymax import Client
 
-from . import crypto
+from . import crypto, vision
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +85,17 @@ def describe_attachments(message) -> str:
             marks.append("ссылка")
 
     return f"[{'; '.join(marks)}]" if marks else ""
+
+
+def photo_links(message) -> list[tuple[int, str]]:
+    """Ссылки на фотографии сообщения. Живут недолго — MAX подписывает их сроком."""
+    links = []
+    for attach in getattr(message, "attaches", None) or []:
+        kind = str(getattr(attach, "type", "")).rsplit(".", 1)[-1].strip("'\"")
+        url = getattr(attach, "base_url", None)
+        if kind == "PHOTO" and url:
+            links.append((getattr(attach, "photo_id", 0), url))
+    return links
 
 
 PAGE = 100
@@ -261,7 +272,8 @@ async def fetch_window(telegram_id: int, phone: str, chat_id: int, hours: int, l
                     continue
 
                 # Текст и пометка о вложениях — вместе: подпись к фото тоже важна
-                text = " ".join(part for part in (message.text or "", describe_attachments(message)) if part).strip()
+                caption = (message.text or "").strip()
+                text = " ".join(part for part in (caption, describe_attachments(message)) if part).strip()
                 if not text:
                     continue
 
@@ -270,9 +282,15 @@ async def fetch_window(telegram_id: int, phone: str, chat_id: int, hours: int, l
                         "time": int(seconds),
                         "author": names.get(message.sender, "Участник"),
                         "text": text,
+                        # Подпись отдельно от текста: по ней решаем, смотреть ли на картинку
+                        "caption": caption,
+                        "photos": photo_links(message),
                     }
                 )
-            return sorted(messages, key=lambda m: m["time"])
+
+            messages.sort(key=lambda m: m["time"])
+            await vision.enrich(messages)
+            return messages
         finally:
             await client.close()
 

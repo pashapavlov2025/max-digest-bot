@@ -57,6 +57,13 @@ CREATE TABLE IF NOT EXISTS activity (
 );
 CREATE INDEX IF NOT EXISTS activity_lookup ON activity (telegram_id, chat_id, at);
 
+-- Описания фотографий: одна и та же картинка попадает в несколько сводок
+CREATE TABLE IF NOT EXISTS photo_notes (
+    photo_id INTEGER PRIMARY KEY,
+    note     TEXT NOT NULL,
+    at       TEXT DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS invites (
     code        TEXT PRIMARY KEY,
     created_by  INTEGER,
@@ -336,6 +343,24 @@ def activity_baseline(telegram_id: int, chat_id: int) -> tuple[float, int]:
             (telegram_id, chat_id),
         ).fetchone()
         return (row["mean"] or 0.0), (row["samples"] or 0)
+
+
+# --- Описания фотографий ---
+
+
+def get_photo_note(photo_id: int) -> str | None:
+    """None — картинку ещё не смотрели. Пустая строка — смотрели, там нечего читать."""
+    with connect() as conn:
+        row = conn.execute("SELECT note FROM photo_notes WHERE photo_id = ?", (photo_id,)).fetchone()
+        return row["note"] if row else None
+
+
+def save_photo_note(photo_id: int, note: str) -> None:
+    with connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO photo_notes (photo_id, note) VALUES (?, ?)", (photo_id, note)
+        )
+        conn.execute("DELETE FROM photo_notes WHERE at < datetime('now', '-60 days')")
 
 
 # --- Инвайты: бот пускает только по коду ---
