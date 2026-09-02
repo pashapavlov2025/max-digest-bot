@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 
-from . import db, digest, errors, max_client
+from . import db, digest, errors, llm, max_client
 from .config import config
 from .bot import texts
 
@@ -49,6 +49,7 @@ async def _digest_chat(
     bot: Bot, user: db.User, chat: db.Chat, hours: int, quiet_if_empty: bool
 ) -> bool:
     announce = not quiet_if_empty  # человек ждёт ответа только когда попросил сам
+    tally = llm.start_tally()
 
     try:
         messages = await max_client.fetch_window(
@@ -83,11 +84,13 @@ async def _digest_chat(
     # Тихий день не тревожим уведомлением: смысл сервиса в экономии внимания
     if quiet_if_empty and digest.is_empty(result) and len(messages) < 5:
         db.log_event(user.telegram_id, "digest_skipped", f"{chat.title}: нечего сообщать")
+        db.note_usage(user.telegram_id, "digest", tally)
         return False
 
     text = digest.render(result, hours, len(messages), chat.title)
     await send_long(bot, user.telegram_id, text)
     db.log_event(user.telegram_id, "digest_sent", f"{chat.title}: {len(messages)} сообщений")
+    db.note_usage(user.telegram_id, "digest", tally)
     return True
 
 
@@ -158,6 +161,7 @@ async def send_morning(bot: Bot, user: db.User) -> bool:
     Берётся из календаря, а не из вчерашней сводки: про часть событий
     в чате писали неделю назад и с тех пор молчат.
     """
+    tally = llm.start_tally()
     zone = ZoneInfo(config.timezone)
     today = datetime.now(zone).strftime("%Y-%m-%d")
     rows = db.calendar_on(user.telegram_id, today)
@@ -176,6 +180,7 @@ async def send_morning(bot: Bot, user: db.User) -> bool:
     await send_long(bot, user.telegram_id, digest.render_agenda(blocks, single_chat=len(user.chats) == 1))
     db.update_user(user.telegram_id, last_morning=today)
     db.log_event(user.telegram_id, "morning_sent", f"{sum(len(items) for _, items in blocks)} пунктов")
+    db.note_usage(user.telegram_id, "morning", tally)
     return True
 
 
@@ -189,6 +194,7 @@ async def answer_question(bot: Bot, user: db.User, question: str, days: int = 30
     if not user.phone or not user.chats:
         return
 
+    tally = llm.start_tally()
     answers: list[tuple[str, str]] = []
     for chat in user.chats:
         try:
@@ -210,6 +216,9 @@ async def answer_question(bot: Bot, user: db.User, question: str, days: int = 30
 
         if not digest.is_nothing(reply):
             answers.append((chat.title, reply))
+
+    db.log_event(user.telegram_id, "question_asked", question[:100])
+    db.note_usage(user.telegram_id, "question", tally)
 
     if not answers:
         await bot.send_message(user.telegram_id, texts.ANSWER_EMPTY)

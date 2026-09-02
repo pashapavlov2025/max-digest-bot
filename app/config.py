@@ -62,6 +62,16 @@ class Config:
     def kimi_model(self) -> str:
         return os.environ.get("KIMI_MODEL", "kimi-k2.6")
 
+    # Цена за миллион токенов у выбранной модели. Ноль — значит в отчёте
+    # будут только токены: врать про деньги хуже, чем промолчать о них.
+    @property
+    def price_in(self) -> float:
+        return float(os.environ.get("PRICE_IN", "0"))
+
+    @property
+    def price_out(self) -> float:
+        return float(os.environ.get("PRICE_OUT", "0"))
+
     # Размышления модели: у kimi-k2.x включены по умолчанию и сильно замедляют ответ
     @property
     def kimi_thinking(self) -> bool:

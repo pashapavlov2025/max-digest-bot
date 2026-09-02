@@ -301,15 +301,73 @@ async def on_users(message: Message) -> None:
         await message.answer("Пока никого.")
         return
 
+    # Состояние словами: по нему видно, на каком шаге человек застрял
+    where = {
+        "new": "не начал подключение MAX",
+        "connecting": "ввёл номер, ждёт код",
+        "choosing_chat": "вошёл, не выбрал чат",
+        "ready": "работает",
+    }
     lines = [
-        f"<code>{u.telegram_id}</code> @{u.username or '—'} · {u.state}"
-        f"{' · пауза' if u.paused else ''} · {u.digest_time} · {len(u.chats)} чат(ов): {u.titles}"
-        f"{f' · сбоев подряд {u.failures}' if u.failures else ''}"
+        f"<code>{u.telegram_id}</code> @{u.username or '—'} — {where.get(u.state, u.state)}"
+        + (f", {len(u.chats)} чат(ов): {u.titles}, сводка в {u.digest_time}" if u.is_ready else "")
+        + (" · на паузе" if u.paused else "")
+        + (f" · сбоев подряд {u.failures}" if u.failures else "")
         for u in users
     ]
     free = db.free_invites()
     lines.append(f"\nНеиспользованных кодов: {len(free)}")
     await message.answer("\n".join(lines))
+
+
+def _money(prompt: int, completion: int) -> str:
+    """Деньги показываем, только если цена задана: выдуманная цифра хуже её отсутствия."""
+    if not (config.price_in or config.price_out):
+        return ""
+    total = prompt / 1_000_000 * config.price_in + completion / 1_000_000 * config.price_out
+    return f" ≈ ${total:.2f}"
+
+
+@router.message(Command("stats"))
+async def on_stats(message: Message, command: CommandObject) -> None:
+    """Кто сколько сжёг токенов. /stats 7 — за неделю, по умолчанию за месяц."""
+    if not _is_admin(message):
+        await message.answer(texts.ADMIN_ONLY)
+        return
+
+    try:
+        days = min(max(int((command.args or "30").split()[0]), 1), 180)
+    except (ValueError, IndexError):
+        days = 30
+
+    people = db.usage_report(days)
+    if not people:
+        await message.answer(f"За {days} дн. обращений к модели не было.")
+        return
+
+    lines = [f"<b>Расход за {days} дн.</b>", ""]
+    total_in = total_out = 0
+    for row in people:
+        prompt, completion = row["prompt"] or 0, row["completion"] or 0
+        total_in += prompt
+        total_out += completion
+        lines.append(
+            f"@{row['username'] or row['telegram_id']} — операций {row['operations']}, "
+            f"обращений {row['calls']}\n    токенов: {prompt:,} на вход, {completion:,} на выход"
+            f"{_money(prompt, completion)}".replace(",", " ")
+        )
+
+    lines += ["", "<b>По видам работы</b>"]
+    names = {"digest": "сводки", "question": "вопросы", "morning": "утренние напоминания"}
+    for row in db.usage_by_kind(days):
+        prompt, completion = row["prompt"] or 0, row["completion"] or 0
+        lines.append(
+            f"• {names.get(row['kind'], row['kind'])}: {row['operations']} шт., "
+            f"{prompt + completion:,} токенов".replace(",", " ")
+        )
+
+    lines += ["", f"<b>Всего:</b> {total_in + total_out:,} токенов{_money(total_in, total_out)}".replace(",", " ")]
+    await service.send_long(message.bot, message.chat.id, "\n".join(lines))
 
 
 @router.message(Command("provider"))

@@ -6,6 +6,7 @@
 Минцифры, и он не принимает json_schema — структуру просим словами.
 """
 
+import contextvars
 import json
 import logging
 import re
@@ -24,6 +25,29 @@ GIGACHAT_OAUTH = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
 GIGACHAT_API = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
 
 _giga_token: tuple[str, float] | None = None
+
+# Счётчик токенов текущей операции. Обращений к модели на одну сводку несколько
+# — сама сводка, склейка по каждой дате, описание каждой картинки, — и чтобы
+# понять, кто сколько потратил, их надо складывать по ходу дела.
+_tally: contextvars.ContextVar[dict | None] = contextvars.ContextVar("llm_tally", default=None)
+
+
+def start_tally() -> dict:
+    """Открывает счёт на текущую операцию и возвращает его же для чтения."""
+    tally = {"calls": 0, "prompt": 0, "completion": 0}
+    _tally.set(tally)
+    return tally
+
+
+def record(usage: dict | None) -> None:
+    """Прибавляет расход одного обращения. Вне открытого счёта — ничего не делает."""
+    tally = _tally.get()
+    if tally is None:
+        return
+    tally["calls"] += 1
+    if usage:
+        tally["prompt"] += int(usage.get("prompt_tokens") or 0)
+        tally["completion"] += int(usage.get("completion_tokens") or 0)
 
 
 async def _kimi(system: str, prompt: str, json_mode: bool) -> str:
@@ -49,7 +73,9 @@ async def _kimi(system: str, prompt: str, json_mode: bool) -> str:
         )
     if response.status_code != 200:
         raise RuntimeError(f"Kimi ответил {response.status_code}: {response.text[:300]}")
-    return response.json()["choices"][0]["message"]["content"]
+    body = response.json()
+    record(body.get("usage"))
+    return body["choices"][0]["message"]["content"]
 
 
 async def _gigachat_token() -> str:
@@ -100,7 +126,9 @@ async def _gigachat(system: str, prompt: str, json_mode: bool) -> str:
         )
     if response.status_code != 200:
         raise RuntimeError(f"GigaChat ответил {response.status_code}: {response.text[:300]}")
-    return response.json()["choices"][0]["message"]["content"]
+    body = response.json()
+    record(body.get("usage"))
+    return body["choices"][0]["message"]["content"]
 
 
 async def complete(system: str, prompt: str, json_mode: bool = False, provider: str | None = None) -> str:

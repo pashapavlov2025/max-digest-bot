@@ -18,7 +18,7 @@ import re
 
 import httpx
 
-from . import db
+from . import db, llm
 from .config import config
 
 log = logging.getLogger(__name__)
@@ -128,7 +128,9 @@ async def _describe(photo_id: int, url: str) -> str:
         if response.status_code != 200:
             log.warning("модель не посмотрела картинку: %s %s", response.status_code, response.text[:200])
             return ""
-        note = response.json()["choices"][0]["message"]["content"].strip()
+        body = response.json()
+        llm.record(body.get("usage"))
+        note = body["choices"][0]["message"]["content"].strip()
     except Exception as exc:  # noqa: BLE001 — сводка важнее одной картинки
         log.warning("сбой при чтении картинки: %s", exc)
         return ""

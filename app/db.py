@@ -70,6 +70,17 @@ CREATE TABLE IF NOT EXISTS calendar (
     PRIMARY KEY (telegram_id, chat_id, on_date, key)
 );
 
+-- Расход на модель по операциям: кто сколько сжёг
+CREATE TABLE IF NOT EXISTS usage (
+    telegram_id INTEGER,
+    kind        TEXT,           -- digest / question / morning
+    calls       INTEGER,
+    prompt      INTEGER,
+    completion  INTEGER,
+    at          TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS usage_lookup ON usage (telegram_id, at);
+
 -- Описания фотографий: одна и та же картинка попадает в несколько сводок
 CREATE TABLE IF NOT EXISTS photo_notes (
     photo_id INTEGER PRIMARY KEY,
@@ -286,7 +297,7 @@ def update_user(telegram_id: int, **fields) -> None:
 
 def delete_user(telegram_id: int) -> None:
     with connect() as conn:
-        for table in ("users", "user_chats", "agenda", "calendar", "activity"):
+        for table in ("users", "user_chats", "agenda", "calendar", "activity", "usage"):
             conn.execute(f"DELETE FROM {table} WHERE telegram_id = ?", (telegram_id,))
 
 
@@ -531,6 +542,53 @@ def activity_baseline(telegram_id: int, chat_id: int) -> tuple[float, int]:
             (telegram_id, chat_id),
         ).fetchone()
         return (row["mean"] or 0.0), (row["samples"] or 0)
+
+
+# --- Расход на модель ---
+
+
+def note_usage(telegram_id: int, kind: str, tally: dict) -> None:
+    if not tally or not tally.get("calls"):
+        return
+    with connect() as conn:
+        conn.execute(
+            "INSERT INTO usage (telegram_id, kind, calls, prompt, completion) VALUES (?, ?, ?, ?, ?)",
+            (telegram_id, kind, tally["calls"], tally["prompt"], tally["completion"]),
+        )
+        conn.execute("DELETE FROM usage WHERE at < datetime('now', '-180 days')")
+
+
+def usage_report(days: int = 30) -> list[dict]:
+    """Кто сколько потратил за период, самые прожорливые сверху."""
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT u.telegram_id, s.username,
+                   COUNT(*) AS operations,
+                   SUM(u.calls) AS calls,
+                   SUM(u.prompt) AS prompt,
+                   SUM(u.completion) AS completion
+              FROM usage u
+              LEFT JOIN users s ON s.telegram_id = u.telegram_id
+             WHERE u.at >= datetime('now', ?)
+             GROUP BY u.telegram_id
+             ORDER BY SUM(u.prompt) + SUM(u.completion) DESC
+            """,
+            (f"-{days} days",),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def usage_by_kind(days: int = 30) -> list[dict]:
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT kind, COUNT(*) AS operations, SUM(prompt) AS prompt, SUM(completion) AS completion
+              FROM usage WHERE at >= datetime('now', ?) GROUP BY kind ORDER BY SUM(prompt) DESC
+            """,
+            (f"-{days} days",),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 # --- Описания фотографий ---
