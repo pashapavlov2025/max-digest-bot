@@ -38,7 +38,11 @@ def has_session(telegram_id: int) -> bool:
 
 def store_session(telegram_id: int, session_path: Path) -> None:
     encrypted = _cipher().encrypt(session_path.read_bytes())
-    _encrypted_path(telegram_id).write_bytes(encrypted)
+    target = _encrypted_path(telegram_id)
+    target.write_bytes(encrypted)
+    # Шифрование защищает от утёкшего диска, права — от соседа по машине.
+    # Нужно и то и другое: по отдельности каждое дырявое.
+    target.chmod(0o600)
 
 
 def drop_session(telegram_id: int) -> None:

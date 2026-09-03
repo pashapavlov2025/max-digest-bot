@@ -1,0 +1,10 @@
+[Unit]
+Description=Резервная копия базы и сессий
+
+[Service]
+Type=oneshot
+User=maxbot
+WorkingDirectory=/opt/max-digest-bot
+# umask 077 — в архиве лежат сессии MAX и выжимки из переписки,
+# читать их посторонним на машине незачем. Держим семь последних копий.
+ExecStart=/bin/bash -c 'umask 077 && tar czf backups/$(date +%%Y-%%m-%%d).tgz data && ls -1t backups/*.tgz | tail -n +8 | xargs -r rm --'

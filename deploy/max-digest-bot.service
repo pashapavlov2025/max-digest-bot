@@ -1,0 +1,24 @@
+[Unit]
+Description=Сводка родительского чата MAX
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=maxbot
+WorkingDirectory=/opt/max-digest-bot
+EnvironmentFile=/opt/max-digest-bot/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/max-digest-bot/.venv/bin/python -m app.main
+Restart=always
+RestartSec=10
+
+# Процесс держит сессии чужих мессенджеров: даём ему ровно то, что нужно
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/max-digest-bot/data /opt/max-digest-bot/backups
+
+[Install]
+WantedBy=multi-user.target

@@ -57,6 +57,11 @@ async def on_button_ask(message: Message, state: FSMContext) -> None:
 async def on_free_question(message: Message, state: FSMContext) -> None:
     """Вопрос, заданный обычным текстом после нажатия кнопки."""
     await state.clear()
+    # Команда — это передумал, а не вопрос: иначе /help уезжает в модель
+    # и попадает в журнал вопросов, что и случилось на живом боте
+    if (message.text or "").startswith("/"):
+        await message.answer("Отменил вопрос.", reply_markup=MAIN_KEYBOARD)
+        return
     user = _require_user(message)
     if user is None:
         await message.answer(texts.NOT_REGISTERED)

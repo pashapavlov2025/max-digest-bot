@@ -85,9 +85,9 @@ def _choose(messages: list[dict]) -> list[int]:
     return sorted(picked)
 
 
-async def _describe(photo_id: int, url: str) -> str:
+async def _describe(telegram_id: int, photo_id: int, url: str) -> str:
     """Одно описание. Пустая строка означает «смотреть не на что»."""
-    cached = db.get_photo_note(photo_id)
+    cached = db.get_photo_note(telegram_id, photo_id)
     if cached is not None:
         return cached
 
@@ -139,11 +139,11 @@ async def _describe(photo_id: int, url: str) -> str:
     if NOTHING.match(note) or len(note) < 3:
         note = ""
     # Пустой результат тоже помним: незачем платить дважды за один и тот же букет
-    db.save_photo_note(photo_id, note)
+    db.save_photo_note(telegram_id, photo_id, note)
     return note
 
 
-async def enrich(messages: list[dict]) -> int:
+async def enrich(telegram_id: int, messages: list[dict]) -> int:
     """
     Дописывает к сообщениям с фотографиями то, что на них видно.
 
@@ -161,7 +161,7 @@ async def enrich(messages: list[dict]) -> int:
     async def work(message: dict) -> None:
         photo_id, url = message["photos"][0]
         async with gate:
-            note = await _describe(photo_id, url)
+            note = await _describe(telegram_id, photo_id, url)
         if note:
             message["text"] = f"{message['text']} [на фото: {note}]"
 

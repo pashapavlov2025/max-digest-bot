@@ -83,9 +83,11 @@ CREATE INDEX IF NOT EXISTS usage_lookup ON usage (telegram_id, at);
 
 -- Описания фотографий: одна и та же картинка попадает в несколько сводок
 CREATE TABLE IF NOT EXISTS photo_notes (
-    photo_id INTEGER PRIMARY KEY,
-    note     TEXT NOT NULL,
-    at       TEXT DEFAULT (datetime('now'))
+    telegram_id INTEGER NOT NULL,
+    photo_id    INTEGER NOT NULL,
+    note        TEXT NOT NULL,
+    at          TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (telegram_id, photo_id)
 );
 
 CREATE TABLE IF NOT EXISTS invites (
@@ -173,6 +175,7 @@ def init() -> None:
 
         _migrate_agenda(conn)
         _repair_keys(conn)
+        _own_photo_notes(conn)
 
         # Переезд с одного чата на список: старую привязку переносим как есть
         conn.execute(
@@ -181,6 +184,10 @@ def init() -> None:
             SELECT telegram_id, chat_id, chat_title FROM users WHERE chat_id IS NOT NULL
             """
         )
+
+    # База лежит открытым текстом: календарь и описания картинок — это выжимка
+    # из чужой переписки. Соседу по машине читать её незачем.
+    config.db_path.chmod(0o600)
 
 
 def _key(what: str) -> str:
@@ -218,6 +225,31 @@ def _migrate_agenda(conn: sqlite3.Connection) -> None:
 
     if rows:
         conn.execute("DELETE FROM agenda")
+
+
+def _own_photo_notes(conn: sqlite3.Connection) -> None:
+    """
+    Приводит кэш описаний к виду с владельцем.
+
+    Старые записи владельца не имеют, восстановить его нельзя — поэтому их
+    просто выбрасываем. Потеря невелика: картинку опишут заново. Держать
+    содержимое чужого чата без хозяина хуже, чем один раз переплатить.
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(photo_notes)")}
+    if "telegram_id" in columns:
+        return
+    conn.execute("DROP TABLE photo_notes")
+    conn.execute(
+        """
+        CREATE TABLE photo_notes (
+            telegram_id INTEGER NOT NULL,
+            photo_id    INTEGER NOT NULL,
+            note        TEXT NOT NULL,
+            at          TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (telegram_id, photo_id)
+        )
+        """
+    )
 
 
 def _repair_keys(conn: sqlite3.Connection) -> None:
@@ -297,7 +329,7 @@ def update_user(telegram_id: int, **fields) -> None:
 
 def delete_user(telegram_id: int) -> None:
     with connect() as conn:
-        for table in ("users", "user_chats", "agenda", "calendar", "activity", "usage"):
+        for table in ("users", "user_chats", "agenda", "calendar", "activity", "usage", "photo_notes"):
             conn.execute(f"DELETE FROM {table} WHERE telegram_id = ?", (telegram_id,))
 
 
@@ -594,17 +626,27 @@ def usage_by_kind(days: int = 30) -> list[dict]:
 # --- Описания фотографий ---
 
 
-def get_photo_note(photo_id: int) -> str | None:
+def get_photo_note(telegram_id: int, photo_id: int) -> str | None:
     """None — картинку ещё не смотрели. Пустая строка — смотрели, там нечего читать."""
     with connect() as conn:
-        row = conn.execute("SELECT note FROM photo_notes WHERE photo_id = ?", (photo_id,)).fetchone()
+        row = conn.execute(
+            "SELECT note FROM photo_notes WHERE telegram_id = ? AND photo_id = ?",
+            (telegram_id, photo_id),
+        ).fetchone()
         return row["note"] if row else None
 
 
-def save_photo_note(photo_id: int, note: str) -> None:
+def save_photo_note(telegram_id: int, photo_id: int, note: str) -> None:
+    """
+    Описание привязано к человеку, а не только к картинке.
+
+    Иначе одна и та же фотография в общем чате порождает запись без владельца,
+    и /stop её не удаляет — а это содержимое чужой переписки.
+    """
     with connect() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO photo_notes (photo_id, note) VALUES (?, ?)", (photo_id, note)
+            "INSERT OR REPLACE INTO photo_notes (telegram_id, photo_id, note) VALUES (?, ?, ?)",
+            (telegram_id, photo_id, note),
         )
         conn.execute("DELETE FROM photo_notes WHERE at < datetime('now', '-60 days')")
 

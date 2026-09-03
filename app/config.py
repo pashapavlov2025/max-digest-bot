@@ -23,10 +23,13 @@ class Config:
         return {int(x) for x in raw.replace(",", " ").split() if x.strip().isdigit()}
 
     # --- Хранилище ---
+    # Каталоги с данными закрыты от посторонних локальных пользователей:
+    # внутри сессии чужих мессенджеров и выжимки из переписки
     @property
     def data_dir(self) -> Path:
         path = Path(os.environ.get("DATA_DIR", "data"))
-        path.mkdir(parents=True, exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.chmod(0o700)
         return path
 
     @property
@@ -36,7 +39,8 @@ class Config:
     @property
     def sessions_dir(self) -> Path:
         path = self.data_dir / "sessions"
-        path.mkdir(parents=True, exist_ok=True)
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.chmod(0o700)
         return path
 
     # Ключ шифрования сессий MAX. Без него сервис не стартует:

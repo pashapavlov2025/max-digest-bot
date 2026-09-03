@@ -289,7 +289,7 @@ async def fetch_window(telegram_id: int, phone: str, chat_id: int, hours: int, l
                 )
 
             messages.sort(key=lambda m: m["time"])
-            await vision.enrich(messages)
+            await vision.enrich(telegram_id, messages)
             return messages
         finally:
             await client.close()
