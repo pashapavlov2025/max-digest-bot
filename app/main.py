@@ -37,6 +37,7 @@ async def main() -> None:
         BotCommand(command="plan", description="Что впереди: события с датами"),
         BotCommand(command="settings", description="Время сводки, чат, пауза"),
         BotCommand(command="help", description="Что я умею"),
+        BotCommand(command="about", description="Какой доступ я получаю"),
         BotCommand(command="stop", description="Удалить мои данные"),
     ])
 

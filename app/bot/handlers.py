@@ -52,6 +52,15 @@ def _yes_keyboard(text: str, data: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=text, callback_data=data)]])
 
 
+def about_keyboard() -> InlineKeyboardMarkup | None:
+    """Кнопка на страницу с описанием доступа. Без ссылки — без кнопки."""
+    if not config.about_url:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=f"ℹ️ {texts.BUTTON_ABOUT}", url=config.about_url)]]
+    )
+
+
 def time_keyboard() -> InlineKeyboardMarkup:
     options = ["18:00", "20:00", "21:00", "22:00"]
     return InlineKeyboardMarkup(
@@ -78,7 +87,7 @@ async def on_start(message: Message, state: FSMContext, command: CommandObject) 
 
     user = db.get_user(message.from_user.id)
     if user and user.is_ready:
-        await message.answer(texts.HELP, reply_markup=MAIN_KEYBOARD)
+        await message.answer(texts.with_about(texts.HELP, config.about_url), reply_markup=MAIN_KEYBOARD)
         return
 
     if user is None:
@@ -87,17 +96,17 @@ async def on_start(message: Message, state: FSMContext, command: CommandObject) 
         if code and db.use_invite(code, message.from_user.id):
             db.create_user(message.from_user.id, message.from_user.username)
             db.log_event(message.from_user.id, "invite_used", code)
-            await message.answer(texts.WELCOME)
+            await message.answer(texts.WELCOME, reply_markup=about_keyboard())
             await message.answer(texts.NEED_PASSWORD, reply_markup=_yes_keyboard("Пароль установил", "pw:done"))
             await state.set_state(Onboarding.password_hint)
             return
 
-        await message.answer(texts.START_LOCKED)
+        await message.answer(texts.START_LOCKED, reply_markup=about_keyboard())
         await state.set_state(Onboarding.invite)
         return
 
     # Пользователь есть, но подключение не доведено до конца — продолжаем с начала
-    await message.answer(texts.WELCOME)
+    await message.answer(texts.WELCOME, reply_markup=about_keyboard())
     await message.answer(texts.NEED_PASSWORD, reply_markup=_yes_keyboard("Пароль установил", "pw:done"))
     await state.set_state(Onboarding.password_hint)
 
@@ -112,7 +121,7 @@ async def on_invite(message: Message, state: FSMContext) -> None:
     db.create_user(message.from_user.id, message.from_user.username)
     db.log_event(message.from_user.id, "invite_used", code)
 
-    await message.answer(texts.WELCOME)
+    await message.answer(texts.WELCOME, reply_markup=about_keyboard())
     await message.answer(texts.NEED_PASSWORD, reply_markup=_yes_keyboard("Пароль установил", "pw:done"))
     await state.set_state(Onboarding.password_hint)
 

@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Какой доступ к MAX получает бот-сводка родительского чата: что читает, чего не делает, что хранит и как это удалить.">
+<meta name="color-scheme" content="light dark">
+
+<!-- Ссылку будут пересылать в мессенджерах — пусть разворачивается по-человечески -->
+<meta property="og:type" content="article">
+<meta property="og:title" content="Что бот видит в вашем MAX">
+<meta property="og:description" content="Какой доступ к MAX получает бот-сводка родительского чата: что читает, чего не делает, что хранит и как это удалить.">
+<meta property="og:locale" content="ru_RU">
+<meta name="twitter:card" content="summary">
+
+<style>
+  html { color-scheme: light dark; }
+  body { margin: 0; }
+  img { max-width: 100%; }
+</style>
+<title>Что бот видит в вашем MAX</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;1,7..72,400&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  :root {
+    --ground: #F5F7F5;
+    --surface: #FFFFFF;
+    --ink: #191E1B;
+    --muted: #59635E;
+    --faint: #8B9590;
+    --accent: #2C5A4C;
+    --ok: #3F6B4A;
+    --warn: #8A6414;
+    --warn-wash: #FAF3E2;
+    --line: #DCE2DE;
+    --rule: #C6D0CA;
+
+    --sans: "Golos Text", "Helvetica Neue", Arial, sans-serif;
+    --serif: "Literata", Georgia, "Times New Roman", serif;
+    --mono: "IBM Plex Mono", "SF Mono", Consolas, monospace;
+
+    --measure: 33rem;
+    --pad: clamp(1.25rem, 5vw, 3rem);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #121613;
+      --surface: #191F1B;
+      --ink: #E6EDE8;
+      --muted: #9AA69F;
+      --faint: #6F7B75;
+      --accent: #7FBBA5;
+      --ok: #7FB58C;
+      --warn: #D6AC5C;
+      --warn-wash: #241E12;
+      --line: #29322C;
+      --rule: #3A453E;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #121613;
+    --surface: #191F1B;
+    --ink: #E6EDE8;
+    --muted: #9AA69F;
+    --faint: #6F7B75;
+    --accent: #7FBBA5;
+    --ok: #7FB58C;
+    --warn: #D6AC5C;
+    --warn-wash: #241E12;
+    --line: #29322C;
+    --rule: #3A453E;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--serif);
+    font-size: 1.0625rem;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: calc(var(--measure) + var(--pad) * 2);
+    margin: 0 auto;
+    padding: var(--pad);
+    display: flex;
+    flex-direction: column;
+    gap: 3.25rem;
+  }
+
+  /* ---- Шапка: сначала неприятная правда, потом всё остальное ---- */
+
+  .head { display: flex; flex-direction: column; gap: 1.5rem; padding-top: 1.5rem; }
+
+  .kicker {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--faint);
+  }
+
+  h1 {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: clamp(1.85rem, 6.5vw, 2.6rem);
+    line-height: 1.14;
+    letter-spacing: -0.02em;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .thesis {
+    font-size: clamp(1.1rem, 3.6vw, 1.3rem);
+    line-height: 1.5;
+    margin: 0;
+    padding-top: 1.25rem;
+    border-top: 2px solid var(--ink);
+  }
+
+  .thesis strong { font-weight: 600; }
+
+  /* ---- Короткая выжимка ---- */
+
+  .brief {
+    background: var(--surface);
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+    padding: 1.5rem var(--pad);
+    margin: 0 calc(var(--pad) * -1);
+  }
+
+  .brief h2 {
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 500;
+    margin: 0 0 1rem;
+  }
+
+  .brief ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 0.7rem; }
+  .brief li { display: grid; grid-template-columns: 1.4rem 1fr; gap: 0.5rem; align-items: baseline; }
+  .brief li::before {
+    content: "";
+    width: 0.5rem; height: 0.5rem;
+    background: var(--accent);
+    display: block;
+    transform: translateY(-0.1rem);
+  }
+
+  /* ---- Разделы с вердиктом ---- */
+
+  section { display: flex; flex-direction: column; gap: 1rem; }
+
+  .verdict {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    font-weight: 500;
+  }
+  .verdict::before { content: ""; width: 0.6rem; height: 0.6rem; display: block; }
+
+  .does { color: var(--accent); }
+  .does::before { background: var(--accent); }
+  .doesnt { color: var(--ok); }
+  .doesnt::before { background: var(--ok); }
+  .could { color: var(--warn); }
+  .could::before { background: var(--warn); }
+
+  h2 {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: clamp(1.25rem, 4vw, 1.5rem);
+    line-height: 1.25;
+    letter-spacing: -0.015em;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  h3 {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 1.0625rem;
+    margin: 0.5rem 0 0;
+  }
+
+  p { margin: 0; }
+  section p + p { margin-top: 0.85rem; }
+
+  ul.plain { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 0.75rem; }
+  ul.plain li { padding-left: 1.15rem; position: relative; }
+  ul.plain li::before {
+    content: "";
+    position: absolute;
+    left: 0; top: 0.62em;
+    width: 0.4rem; height: 1px;
+    background: var(--rule);
+  }
+
+  strong { font-weight: 600; }
+  em { font-style: italic; color: var(--muted); }
+
+  /* ---- Честное предупреждение ---- */
+
+  .notice {
+    background: var(--warn-wash);
+    border-top: 1px solid var(--warn);
+    border-bottom: 1px solid var(--warn);
+    padding: 1.5rem var(--pad);
+    margin: 0 calc(var(--pad) * -1);
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  /* ---- Опись хранимого ---- */
+
+  .table-wrap { overflow-x: auto; margin: 0 calc(var(--pad) * -1); padding: 0 var(--pad); }
+
+  table { border-collapse: collapse; width: 100%; min-width: 30rem; font-family: var(--sans); font-size: 0.94rem; }
+
+  th {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--faint);
+    font-weight: 500;
+    padding: 0 0.9rem 0.6rem 0;
+    border-bottom: 1px solid var(--rule);
+    vertical-align: bottom;
+  }
+  th:last-child, td:last-child { padding-right: 0; }
+
+  td {
+    padding: 0.8rem 0.9rem 0.8rem 0;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+    line-height: 1.45;
+  }
+
+  td.what { color: var(--muted); }
+  .path { font-family: var(--mono); font-size: 0.85em; color: var(--ink); }
+  .how { white-space: nowrap; font-weight: 500; }
+  .how.enc { color: var(--ok); }
+  .how.raw { color: var(--warn); }
+
+  /* ---- Подвал ---- */
+
+  footer {
+    border-top: 1px solid var(--rule);
+    padding-top: 1.5rem;
+    padding-bottom: 2rem;
+    color: var(--muted);
+    font-size: 0.94rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+  }
+
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 0.18em; }
+  a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: 0.05em 0.35em;
+  }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+  <header class="head">
+    <div class="kicker">Сводка родительского чата · как это работает</div>
+    <h1>Что бот видит в вашем MAX</h1>
+    <p class="thesis">Начнём с неприятного, потому что прятать это нечестно: чтобы читать ваш родительский чат, бот входит в MAX <strong>под вашим именем</strong>. А значит получает доступ к аккаунту целиком, а не к одному чату. Ниже — что он с этим доступом делает, чего не делает и чего сделать не может.</p>
+  </header>
+
+  <div class="brief">
+    <h2>Если читать некогда</h2>
+    <ul>
+      <li>Бот читает <strong>только те чаты, которые вы сами отметили</strong>, и раз в день присылает выжимку в Telegram.</li>
+      <li>Он ничего не пишет от вашего имени и не отмечает сообщения прочитанными — в чате вас не видно.</li>
+      <li>Пароль от MAX нужен один раз при подключении и нигде не сохраняется.</li>
+      <li>Но техническая возможность прочитать остальное у него есть. Мешает этому только код и порядочность человека, который держит сервер.</li>
+      <li>Команда <code>/stop</code> удаляет доступ и все данные.</li>
+    </ul>
+  </div>
+
+  <section>
+    <div class="verdict does">Делает</div>
+    <h2>Что происходит после подключения</h2>
+    <ul class="plain">
+      <li><strong>Читает историю выбранных чатов.</strong> Раз в сутки — за последние сутки. Когда вы просите сами — за столько дней, сколько скажете.</li>
+      <li><strong>Один раз показывает список ваших чатов</strong>, чтобы вы выбрали нужные. Видит при этом названия, число участников и когда там писали последний раз. В памяти остаются только выбранные.</li>
+      <li><strong>Видит имена тех, кто пишет</strong> в выбранном чате — иначе в сводке не понять, кто о чём договорился.</li>
+      <li><strong>Смотрит некоторые фотографии.</strong> Только те, у которых есть подпись или про которые в чате следом спросили: обычно это расписание, список учебников или домашнее задание. Снимки с праздника бот не открывает.</li>
+      <li><strong>Отправляет вам выжимку</strong> в личные сообщения Telegram — вечером и коротким напоминанием утром.</li>
+    </ul>
+  </section>
+
+  <section>
+    <div class="verdict doesnt">Не делает</div>
+    <h2>Чего он не делает никогда</h2>
+    <ul class="plain">
+      <li><strong>Не читает ваши личные переписки</strong>, рабочие чаты и сообщения от Госуслуг. В коде есть ровно два места, где запрашиваются сообщения, и оба обращаются только к отмеченным вами чатам.</li>
+      <li><strong>Не пишет никому от вашего имени</strong> и не оставляет реакций. Отправка сообщений в боте не реализована вообще.</li>
+      <li><strong>Не отмечает сообщения прочитанными.</strong> Со стороны других участников чата вас как будто не было.</li>
+      <li><strong>Не сохраняет ваш пароль.</strong> Подробнее — ниже.</li>
+      <li><strong>Не переносит в сводку чужие телефоны и адреса.</strong> Если на фотографии окажется список класса с контактами, в сводке будет строчка «список класса с контактами» — без имён и номеров. Исключение одно: реквизиты для оплаты, иначе непонятно, куда сдавать деньги.</li>
+    </ul>
+  </section>
+
+  <div class="notice">
+    <div class="verdict could">Может, но не делает</div>
+    <h2>Самое важное на этой странице</h2>
+    <p>Когда вы подключаетесь, бот сохраняет <strong>ключ от вашего аккаунта</strong> — техническую замену пароля. С этим ключом можно прочитать любой чат, включая личные и служебные, и написать кому угодно от вашего имени.</p>
+    <p>Бот так не делает. Но не потому, что не может, — а потому, что так написан код. Это <em>обещание</em>, а не техническая преграда. Проверить его можно единственным способом: посмотреть исходники, они открыты.</p>
+    <p>Если вам это не подходит — не подключайтесь. Это нормальный ответ, и обижаться тут не на что.</p>
+  </div>
+
+  <section>
+    <h2>Зачем вообще пароль от MAX</h2>
+    <p>MAX не пускает на новое устройство, пока у аккаунта не задан «пароль для входа». Без него вместо кода приходит предложение завести пароль — а прочитать это можно только в мобильном приложении.</p>
+    <p>Пароль используется <strong>один раз</strong>, в момент подключения. Он не сохраняется ни в базе бота, ни в файле сессии: там лежат только ключ доступа, идентификатор устройства и номер телефона. Сообщение с паролем бот удаляет из переписки сразу.</p>
+    <p>Но честный вывод такой: настоящий предмет разговора — не пароль, а ключ доступа, который остаётся после входа. По силе он равен паролю.</p>
+  </section>
+
+  <section>
+    <h2>Куда уходят ваши сообщения</h2>
+    <p>Выжимку делает языковая модель, и своей у бота нет. Тексты сообщений из выбранных чатов, имена авторов и отобранные фотографии отправляются в <strong>Kimi — сервис компании Moonshot AI, Китай</strong>. Туда же уходит текст вопроса, если вы что-то спрашиваете у бота.</p>
+    <p>Готовая сводка приходит вам в Telegram. Больше никуда бот не обращается — всего четыре адреса, и два из них запасные.</p>
+    <p>Что Moonshot делает с полученными текстами, зависит от их правил, а не от нас. Если в вашем чате обсуждают что-то, чего не должен видеть никто посторонний, — это довод не подключать такой чат.</p>
+  </section>
+
+  <section>
+    <h2>Что лежит на сервере</h2>
+    <p>Сами сообщения нигде не хранятся: бот их прочитал, отправил в модель и забыл. А вот это остаётся:</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Что</th><th>Зачем</th><th>Как хранится</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Ключ доступа к MAX</td>
+            <td class="what">Чтобы читать чат без вашего участия</td>
+            <td class="how enc">Зашифровано</td>
+          </tr>
+          <tr>
+            <td>Номер телефона</td>
+            <td class="what">Нужен при входе в MAX</td>
+            <td class="how raw">Открыто</td>
+          </tr>
+          <tr>
+            <td>Названия выбранных чатов</td>
+            <td class="what">Подписать сводку</td>
+            <td class="how raw">Открыто</td>
+          </tr>
+          <tr>
+            <td>События с датами</td>
+            <td class="what">Напомнить о том, что обсуждали неделю назад</td>
+            <td class="how raw">Открыто</td>
+          </tr>
+          <tr>
+            <td>Описания прочитанных фото</td>
+            <td class="what">Не платить дважды за одну картинку</td>
+            <td class="how raw">Открыто</td>
+          </tr>
+          <tr>
+            <td>Ваши вопросы боту</td>
+            <td class="what">Журнал работы</td>
+            <td class="how raw">Открыто</td>
+          </tr>
+          <tr>
+            <td class="path">Сами сообщения чата</td>
+            <td class="what">—</td>
+            <td class="how">Не хранятся</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p>«Зашифровано» означает, что при краже диска или утечке резервной копии ключ не прочитают. От владельца сервера это не защищает: ключ шифрования лежит на той же машине. Файлы закрыты от посторонних пользователей системы, сервер не принимает входящих соединений, кроме доступа по ключу для обслуживания.</p>
+  </section>
+
+  <section>
+    <h2>Как всё удалить</h2>
+    <p>Отправьте боту <code>/stop</code>. Он немедленно удаляет ключ доступа к MAX, ваши настройки, список чатов, сохранённые события и описания фотографий. После этого попасть в ваш аккаунт он не может.</p>
+    <p>Одна оговорка, о которой стоит знать: резервные копии хранятся неделю и перезаписываются по кругу. Значит, ваши данные полностью исчезнут не в момент команды, а в течение <strong>семи дней</strong> после неё.</p>
+    <p>Ещё надёжнее — зайти в MAX и завершить сеансы на всех устройствах. Тогда ключ перестанет работать, даже если где-то останется.</p>
+  </section>
+
+  <section>
+    <h2>Если сомневаетесь</h2>
+    <p>Разумный подход — подключить только тот чат, ради которого всё затевалось, и посмотреть неделю. Если не понравится, <code>/stop</code> и завершение сеансов в MAX возвращают всё как было.</p>
+    <p>Если отдавать доступ к аккаунту не хочется в принципе — это правильное сомнение, и уговаривать вас никто не будет. Исходный код открыт: его можно прочитать самому, показать знающему человеку или поднять свой экземпляр, чтобы ключ от вашего MAX лежал только у вас.</p>
+  </section>
+
+  <footer>
+    <p>Сервис держит на своём сервере тот, кто дал вам приглашение. У него есть доступ к серверу, а значит и техническая возможность добраться до всего перечисленного. Спрашивайте с него.</p>
+    <p>Исходный код: <a href="https://github.com/pashapavlov2025/max-digest-bot">github.com/pashapavlov2025/max-digest-bot</a> — открытая лицензия MIT.</p>
+  </footer>
+
+</div>
+</body>
+</html>

@@ -10,7 +10,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .. import crypto, db, digest, max_client, service
-from .handlers import Onboarding, show_chat_picker, time_keyboard
+from .handlers import Onboarding, about_keyboard, show_chat_picker, time_keyboard
 from ..config import config
 from . import texts
 from .keyboards import MAIN as MAIN_KEYBOARD
@@ -87,7 +87,19 @@ def _require_user(message: Message) -> db.User | None:
 @router.message(Command("help"))
 async def on_help(message: Message) -> None:
     keyboard = MAIN_KEYBOARD if _require_user(message) else None
-    await message.answer(texts.HELP, reply_markup=keyboard)
+    await message.answer(texts.with_about(texts.HELP, config.about_url), reply_markup=keyboard)
+
+
+@router.message(Command("about"))
+async def on_about(message: Message) -> None:
+    """Страница о том, какой доступ получает бот. Спрашивают об этом первым делом."""
+    if not config.about_url:
+        await message.answer("Описание доступа не настроено на этом экземпляре.")
+        return
+    await message.answer(
+        texts.ABOUT_LINE.format(url=config.about_url),
+        reply_markup=about_keyboard(),
+    )
 
 
 @router.message(Command("summary"))

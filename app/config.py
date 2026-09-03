@@ -22,6 +22,12 @@ class Config:
         raw = os.environ.get("ADMIN_IDS", "")
         return {int(x) for x in raw.replace(",", " ").split() if x.strip().isdigit()}
 
+    # Страница «что бот видит в вашем MAX». Свой экземпляр — своя ссылка;
+    # пустое значение просто убирает упоминание, а не ломает тексты.
+    @property
+    def about_url(self) -> str:
+        return os.environ.get("ABOUT_URL", "https://pashapavlov2025.github.io/max-digest-bot/").strip()
+
     # --- Хранилище ---
     # Каталоги с данными закрыты от посторонних локальных пользователей:
     # внутри сессии чужих мессенджеров и выжимки из переписки
