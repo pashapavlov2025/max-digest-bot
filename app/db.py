@@ -682,3 +682,27 @@ def log_event(telegram_id: int | None, kind: str, detail: str = "") -> None:
             "INSERT INTO events (telegram_id, kind, detail) VALUES (?, ?, ?)",
             (telegram_id, kind, detail[:500]),
         )
+
+
+def recent_events(limit: int = 30, telegram_id: int | None = None) -> list[dict]:
+    """
+    Последние события, свежие сверху.
+
+    Пишутся они с самого начала, но до сих пор их никто не читал: на вопрос
+    «где человек застрял» приходилось лезть в журнал systemd на сервере.
+    """
+    where = "WHERE e.telegram_id = ?" if telegram_id else ""
+    values: tuple = (telegram_id, limit) if telegram_id else (limit,)
+    with connect() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT e.at, e.telegram_id, e.kind, e.detail, u.username
+              FROM events e
+              LEFT JOIN users u ON u.telegram_id = e.telegram_id
+              {where}
+             ORDER BY e.id DESC
+             LIMIT ?
+            """,
+            values,
+        ).fetchall()
+    return [dict(row) for row in rows]

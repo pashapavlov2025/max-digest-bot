@@ -158,27 +158,56 @@ async def on_phone(message: Message, state: FSMContext) -> None:
     await flow.start()
     if not await flow.wait_for_code_prompt():
         error = flow.error or "MAX не прислал код"
+        db.log_event(message.from_user.id, "login_failed", f"запрос кода: {error}")
         await _cleanup_login(message.from_user.id)
-        await message.answer(texts.LOGIN_FAILED.format(error=error))
+        await message.answer(texts.LOGIN_FAILED.format(error=texts.quote(error)))
         await state.clear()
         return
 
+    request = flow.code_request
     db.update_user(message.from_user.id, phone=phone, state="connecting")
-    await message.answer(texts.ASK_CODE.format(phone=phone))
+    db.log_event(message.from_user.id, "code_requested", str(request) if request else "без подробностей")
+    await message.answer(_code_question(phone, request))
     await state.set_state(Onboarding.code)
+
+
+def _code_question(phone: str, request: max_client.CodeRequest | None) -> str:
+    """
+    Шаг 3 словами самого MAX: сколько цифр он прислал и сколько попыток оставил.
+
+    Без остатка попыток человек ждёт SMS, которой уже не будет, и решает,
+    что сломался бот.
+    """
+    left = request.attempts_left if request else None
+    if left == 0:
+        limit = texts.CODE_LAST_TRY
+    elif left:
+        limit = texts.CODE_TRIES_LEFT.format(left=left)
+    else:
+        limit = ""
+
+    return texts.ASK_CODE.format(
+        phone=phone,
+        digits=texts.digits_word(request.length if request else 0),
+        limit=limit,
+    )
 
 
 @router.message(Onboarding.code)
 async def on_code(message: Message, state: FSMContext) -> None:
     flow = logins.get(message.from_user.id)
     if flow is None:
+        db.log_event(message.from_user.id, "login_failed", "сессия входа потерялась")
         await message.answer(texts.LOGIN_FAILED.format(error="сессия входа потерялась"))
         await state.clear()
         return
 
     code = re.sub(r"\D", "", message.text or "")
-    if len(code) < 4:
-        await message.answer("Нужен код из SMS — только цифры.")
+    # Длину знает MAX; если не сказал — хотя бы отсеиваем явный мусор
+    expected = flow.code_request.length if flow.code_request else 0
+    fits = len(code) == expected if expected else len(code) >= 4
+    if not fits:
+        await message.answer(f"Не похоже на код. Пришлите {texts.digits_word(expected)} — без пробелов и букв.")
         return
 
     await flow.submit_code(code)
@@ -199,6 +228,7 @@ async def on_code(message: Message, state: FSMContext) -> None:
 async def on_max_password(message: Message, state: FSMContext) -> None:
     flow = logins.get(message.from_user.id)
     if flow is None:
+        db.log_event(message.from_user.id, "login_failed", "сессия входа потерялась на пароле")
         await message.answer(texts.LOGIN_FAILED.format(error="сессия входа потерялась"))
         await state.clear()
         return
@@ -221,13 +251,15 @@ async def _finish_login(message: Message, state: FSMContext) -> None:
         await flow.finish()
     except Exception as exc:  # noqa: BLE001 — текст ошибки нужен пользователю
         error = flow.error or str(exc)
+        db.log_event(message.from_user.id, "login_failed", error)
         await _cleanup_login(message.from_user.id)
-        await message.answer(texts.LOGIN_FAILED.format(error=error))
+        await message.answer(texts.LOGIN_FAILED.format(error=texts.quote(error)))
         await state.clear()
         return
 
     session_file = flow.work_dir / crypto.SESSION_FILE
     if not session_file.exists():
+        db.log_event(message.from_user.id, "login_failed", "MAX не отдал сессию")
         await _cleanup_login(message.from_user.id)
         await message.answer(texts.LOGIN_FAILED.format(error="MAX не отдал сессию"))
         await state.clear()
@@ -243,7 +275,8 @@ async def _finish_login(message: Message, state: FSMContext) -> None:
     try:
         chats = await max_client.list_chats(message.from_user.id, phone)
     except Exception as exc:  # noqa: BLE001
-        await message.answer(texts.SESSION_BROKEN.format(error=exc))
+        db.log_event(message.from_user.id, "chats_failed", str(exc))
+        await message.answer(texts.SESSION_BROKEN.format(error=texts.quote(exc)))
         await state.clear()
         return
 

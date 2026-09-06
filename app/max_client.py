@@ -21,33 +21,62 @@ from . import crypto, vision
 log = logging.getLogger(__name__)
 
 
-def _log_code_requests() -> None:
+@dataclass
+class CodeRequest:
+    """
+    Что MAX ответил на запрос кода.
+
+    Длина кода нужна, чтобы просить у человека ровно столько цифр, сколько
+    ему пришло, а остаток попыток — чтобы отличить «код ещё летит» от
+    «запросы кончились». Иначе «кода нет» не разобрать.
+    """
+
+    length: int
+    attempts_left: int | None
+    wait_ms: int
+
+    def __str__(self) -> str:
+        return (
+            f"длина {self.length or '?'}, "
+            f"попыток осталось {'?' if self.attempts_left is None else self.attempts_left}, "
+            f"ждать до {self.wait_ms or '?'} мс"
+        )
+
+
+# Ответы MAX на запрос кода, по номеру телефона. PyMax проходит вход внутри
+# connect() и наружу этих цифр не отдаёт — перехватываем по дороге.
+code_requests: dict[str, CodeRequest] = {}
+
+
+def _watch_code_requests() -> None:
     """
     MAX не сообщает, куда именно ушёл код, но в ответе есть его длина,
     остаток попыток и таймауты. Без этого разбирать «код не пришёл» нечем.
     """
     from pymax.api.auth.service import AuthService
 
-    if getattr(AuthService.request_code, "_logged", False):
+    if getattr(AuthService.request_code, "_watched", False):
         return
 
     original = AuthService.request_code
 
-    async def logged(self, phone: str):  # type: ignore[no-untyped-def]
+    async def watched(self, phone: str):  # type: ignore[no-untyped-def]
         response = await original(self, phone)
-        log.info(
-            "MAX принял запрос кода: длина %s, попыток осталось %s, ждать до %s мс",
-            getattr(response, "code_length", "?"),
-            getattr(response, "request_count_left", "?"),
-            getattr(response, "request_max_duration", "?"),
+        request = CodeRequest(
+            length=getattr(response, "code_length", 0) or 0,
+            attempts_left=getattr(response, "request_count_left", None),
+            wait_ms=getattr(response, "request_max_duration", 0) or 0,
         )
+        code_requests[phone] = request
+        log.info("MAX принял запрос кода: %s", request)
         return response
 
-    logged._logged = True  # type: ignore[attr-defined]
-    AuthService.request_code = logged  # type: ignore[method-assign]
+    watched._watched = True  # type: ignore[attr-defined]
+    AuthService.request_code = watched  # type: ignore[method-assign]
 
 
-_log_code_requests()
+_watch_code_requests()
+
 
 def describe_attachments(message) -> str:
     """
@@ -142,7 +171,14 @@ class LoginFlow:
     client: Client | None = None
     error: str | None = None
 
+    @property
+    def code_request(self) -> CodeRequest | None:
+        """Ответ MAX на запрос кода — если он вообще был."""
+        return code_requests.get(self.phone)
+
     async def start(self) -> None:
+        # Цифры прошлой попытки не должны выдать себя за свежие
+        code_requests.pop(self.phone, None)
         self.client = Client(
             phone=self.phone,
             work_dir=str(self.work_dir),
@@ -183,6 +219,7 @@ class LoginFlow:
         await asyncio.wait_for(asyncio.shield(self.task), timeout=timeout)
 
     async def close(self) -> None:
+        code_requests.pop(self.phone, None)
         if self.client is not None:
             try:
                 await self.client.close()

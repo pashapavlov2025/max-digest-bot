@@ -337,6 +337,60 @@ async def on_users(message: Message) -> None:
     await message.answer("\n".join(lines))
 
 
+# Больше двух сотен строк Telegram всё равно порежет на простыни
+MAX_EVENTS = 200
+
+# События словами: «login_failed» админу ни о чём не говорит
+EVENT_NAMES = {
+    "invite_used": "принял приглашение",
+    "code_requested": "MAX выслал код",
+    "login_failed": "вход не удался",
+    "logged_in": "вошёл в MAX",
+    "chats_failed": "не смог прочитать список чатов",
+    "chats_set": "выбрал чаты",
+    "stopped": "удалил свои данные",
+}
+
+
+@router.message(Command("events"))
+async def on_events(message: Message, command: CommandObject) -> None:
+    """
+    Что происходило у людей: /events, /events 50, /events 12345.
+
+    Нужна ровно для случая «друг говорит, что не пришёл код»: видно, дошёл ли
+    запрос до MAX, какой длины код он выслал и сколько попыток оставил.
+    """
+    if not _is_admin(message):
+        await message.answer(texts.ADMIN_ONLY)
+        return
+
+    limit, who = 30, None
+    for part in (command.args or "").split():
+        if not part.isdigit():
+            continue
+        # Числа до двух сотен — это «сколько показать», всё крупнее — telegram_id
+        value = int(part)
+        if value <= MAX_EVENTS:
+            limit = max(value, 1)
+        else:
+            who = value
+
+    events = db.recent_events(limit, who)
+    if not events:
+        await message.answer("Событий нет." if who is None else f"У {who} событий нет.")
+        return
+
+    lines = [f"<b>Последние события</b>{'' if who is None else f' — {who}'}", ""]
+    for event in events:
+        name = EVENT_NAMES.get(event["kind"], event["kind"])
+        detail = f" — <code>{texts.quote((event['detail'] or '')[:120])}</code>" if event["detail"] else ""
+        # Имя, если оно есть: @1234567 читается как ник, а это id
+        who_said = f"@{event['username']}" if event["username"] else str(event["telegram_id"] or "служба")
+        lines.append(f"{event['at']} · {who_said}: {name}{detail}")
+
+    await service.send_long(message.bot, message.chat.id, "\n".join(lines))
+
+
 def _money(prompt: int, completion: int) -> str:
     """Деньги показываем, только если цена задана: выдуманная цифра хуже её отсутствия."""
     if not (config.price_in or config.price_out):
@@ -427,6 +481,7 @@ async def on_health(message: Message) -> None:
         lines.append("\n<b>Сбоят:</b>")
         for u in broken:
             lines.append(
-                f"• @{u.username or u.telegram_id} — подряд {u.failures}: <code>{(u.last_error or '')[:150]}</code>"
+                f"• @{u.username or u.telegram_id} — подряд {u.failures}: "
+                f"<code>{texts.quote((u.last_error or '')[:150])}</code>"
             )
     await message.answer("\n".join(lines))
