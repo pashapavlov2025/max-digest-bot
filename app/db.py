@@ -527,33 +527,6 @@ def calendar_ahead(telegram_id: int, days: int = 14) -> list[dict]:
     ]
 
 
-# --- Замеры активности ---def calendar_ahead(telegram_id: int, days: int = 14) -> list[dict]:
-    """Всё, что записано на ближайшие дни, начиная с сегодня."""
-    with connect() as conn:
-        rows = conn.execute(
-            """
-            SELECT c.on_date, c.at_time, c.what, c.first_seen, u.chat_title
-              FROM calendar c
-              LEFT JOIN user_chats u ON u.telegram_id = c.telegram_id AND u.chat_id = c.chat_id
-             WHERE c.telegram_id = ?
-               AND c.on_date >= date('now')
-               AND c.on_date <= date('now', ?)
-             ORDER BY c.on_date, c.at_time IS NULL, c.at_time
-            """,
-            (telegram_id, f"+{days} days"),
-        ).fetchall()
-    return [
-        {
-            "date": row["on_date"],
-            "when": row["at_time"] or "",
-            "what": row["what"],
-            "title": row["chat_title"] or "чат",
-            "first_seen": row["first_seen"],
-        }
-        for row in rows
-    ]
-
-
 # --- Замеры активности ---
 
 

@@ -78,14 +78,28 @@ async def _digest_chat(
     # Иначе сломанная модель каждый день считалась бы первым сбоем и каждый день
     # об этом сообщала.
     db.note_success(user.telegram_id)
-    result["tomorrow"] = await _tomorrow_with_memory(user, chat, result)
+
+    # Пустоту считаем по свежей переписке — до того, как подмешана память.
+    # Иначе событие, записанное неделю назад, делает «непустым» любой день,
+    # и тихих дней не остаётся вовсе.
+    nothing_new = digest.is_empty(result)
+    result["tomorrow"], result["tomorrow_note"] = await _tomorrow_with_memory(user, chat, result)
     await _remember(user, chat, result)
 
-    # Тихий день не тревожим уведомлением: смысл сервиса в экономии внимания
-    if quiet_if_empty and digest.is_empty(result) and len(messages) < 5:
-        db.log_event(user.telegram_id, "digest_skipped", f"{chat.title}: нечего сообщать")
+    if quiet_if_empty and nothing_new:
+        # Совсем нечего сказать — молчим: смысл сервиса в экономии внимания
+        if not result["tomorrow"] and len(messages) < 5:
+            db.log_event(user.telegram_id, "digest_skipped", f"{chat.title}: нечего сообщать")
+            db.note_usage(user.telegram_id, "digest", tally)
+            return False
+
+        # Есть что напомнить про завтра, но сводки не получилось: короткая форма
+        await send_long(
+            bot, user.telegram_id, digest.render_quiet(result, hours, len(messages), chat.title)
+        )
+        db.log_event(user.telegram_id, "digest_quiet", f"{chat.title}: {len(messages)} сообщений")
         db.note_usage(user.telegram_id, "digest", tally)
-        return False
+        return True
 
     text = digest.render(result, hours, len(messages), chat.title)
     await send_long(bot, user.telegram_id, text)
@@ -98,23 +112,29 @@ def _tomorrow(zone: ZoneInfo) -> str:
     return (datetime.now(zone) + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
-async def _tomorrow_with_memory(user: db.User, chat: db.Chat, result: dict) -> list[dict]:
+async def _tomorrow_with_memory(user: db.User, chat: db.Chat, result: dict) -> tuple[list[dict], str]:
     """
     Блок «завтра» пополняется тем, что бот запомнил раньше.
 
     В живом чате про поднятие флага сказали один раз за десять дней до него.
     Сводка за сутки такое не увидит — она читает только вчерашнюю переписку.
     Календарь видит, поэтому накануне событие всё равно всплывёт.
+
+    Второе значение — пометка о происхождении блока. Она нужна, когда про
+    завтра в свежей переписке не было ни слова: шесть пунктов из позапрошлой
+    среды иначе читаются как «бот прочитал неделю, а пишет, что сутки».
     """
     zone = ZoneInfo(config.timezone)
-    remembered = [
-        {"when": item["when"], "what": item["what"]}
-        for item in db.calendar_on(user.telegram_id, _tomorrow(zone), chat.chat_id)
-    ]
-    items = digest.tomorrow_items(result) + remembered
+    rows = db.calendar_on(user.telegram_id, _tomorrow(zone), chat.chat_id)
+    remembered = [{"when": row["when"], "what": row["what"]} for row in rows]
+
+    fresh = digest.tomorrow_items(result)
+    items = fresh + remembered
     if not items:
-        return []
-    return await digest.merge(items, provider=user.llm_provider)
+        return [], ""
+
+    note = "" if fresh else digest.memory_note(rows)
+    return await digest.merge(items, provider=user.llm_provider), note
 
 
 async def _remember(user: db.User, chat: db.Chat, result: dict) -> None:

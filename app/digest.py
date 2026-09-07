@@ -84,6 +84,45 @@ def period_label(hours: int) -> str:
     return f"последние {round(hours / 24)} дн."
 
 
+def window_label(hours: int) -> str:
+    """
+    Границы окна словами.
+
+    «Сутки» — это последние 24 часа, а не сегодняшний день: вечерняя сводка
+    захватывает вчерашний вечер. Пока об этом не сказано, человек сверяет
+    счётчик с тем, что видит в чате за сегодня, и числа не сходятся.
+    """
+    zone = ZoneInfo(config.timezone)
+    until = datetime.now(zone)
+    since = until - timedelta(hours=hours)
+    if since.date() == until.date():
+        return f"за {since:%H:%M}–{until:%H:%M}"
+    return f"с {since:%H:%M} {since:%d.%m} по {until:%H:%M} {until:%d.%m}"
+
+
+def memory_note(rows: list[dict]) -> str:
+    """
+    Пометка для блока «Завтра», собранного не из свежей переписки.
+
+    Без неё пять пунктов, записанных на прошлой неделе, читаются как «бот
+    прочитал не сутки, а неделю» — и сводка выглядит перегруженной.
+    """
+    seen = [parse_date((row.get("first_seen") or "")[:10]) for row in rows]
+    seen = [day for day in seen if day]
+    if not seen:
+        return "из более ранней переписки"
+    return f"из более ранней переписки — писали {min(seen):%d.%m}"
+
+
+def _points(items: list[dict]) -> list[str]:
+    """Пункты со временем там, где оно известно."""
+    lines = []
+    for item in items:
+        when = esc(item.get("when")) if _filled(item.get("when")) else ""
+        lines.append(f"• {when} — {esc(item.get('what'))}" if when else f"• {esc(item.get('what'))}")
+    return lines
+
+
 def transcript(messages: list[dict], tz: str) -> str:
     zone = ZoneInfo(tz)
     lines = []
@@ -166,9 +205,9 @@ def render(digest: dict, hours: int, message_count: int, chat_title: str | None 
 
     if digest.get("tomorrow"):
         lines += ["", "<b>🌅 Завтра</b>"]
-        for item in digest["tomorrow"]:
-            when = esc(item.get("when")) if _filled(item.get("when")) else ""
-            lines.append(f"• {when} — {esc(item.get('what'))}" if when else f"• {esc(item.get('what'))}")
+        if digest.get("tomorrow_note"):
+            lines.append(f"<i>{esc(digest['tomorrow_note'])}</i>")
+        lines += _points(digest["tomorrow"])
 
     if digest.get("decisions"):
         lines += ["", "<b>✅ Решения</b>"]
@@ -181,7 +220,33 @@ def render(digest: dict, hours: int, message_count: int, chat_title: str | None 
     if _filled(digest.get("noise")):
         lines += ["", f"<i>💬 Остальное: {esc(digest['noise'])}</i>"]
 
-    lines += ["", f"<i>{message_count} сообщений обработано</i>"]
+    lines += ["", f"<i>{message_count} сообщений {window_label(hours)}</i>"]
+    return "\n".join(lines)
+
+
+def render_quiet(digest: dict, hours: int, message_count: int, chat_title: str | None = None) -> str:
+    """
+    Тихий день: за сутки не случилось ничего, что требует действий.
+
+    Полная сводка с пустыми разделами в такой день читается как перегруз —
+    особенно на выходных, где весь её объём даёт блок «Завтра» из памяти.
+    Поэтому короткая форма: строка о тишине, трёп одной строкой и завтрашний день.
+    """
+    title = chat_title or "Родительский чат"
+    lines = [
+        f"<b>📋 {esc(title)}</b>",
+        f"Ничего, что требует действий — {message_count} сообщений {window_label(hours)}.",
+    ]
+
+    if _filled(digest.get("noise")):
+        lines += ["", f"<i>💬 Остальное: {esc(digest['noise'])}</i>"]
+
+    if digest.get("tomorrow"):
+        lines += ["", "<b>🌅 Завтра</b>"]
+        if digest.get("tomorrow_note"):
+            lines.append(f"<i>{esc(digest['tomorrow_note'])}</i>")
+        lines += _points(digest["tomorrow"])
+
     return "\n".join(lines)
 
 
@@ -217,9 +282,7 @@ def render_agenda(blocks: list[tuple[str, list[dict]]], single_chat: bool) -> st
     for title, items in blocks:
         if not single_chat:
             lines.append(f"\n<b>{esc(title)}</b>")
-        for item in items:
-            when = esc(item.get("when")) if _filled(item.get("when")) else ""
-            lines.append(f"• {when} — {esc(item.get('what'))}" if when else f"• {esc(item.get('what'))}")
+        lines += _points(items)
     return "\n".join(lines)
 
 
