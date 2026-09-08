@@ -329,6 +329,25 @@ async def on_invite(message: Message) -> None:
     )
 
 
+def _where(user: db.User) -> str:
+    """
+    Место в воронке по фактам, а не по колонке `state`.
+
+    Колонка откатывается на «ждёт код» при каждом запросе кода и потом врёт
+    про тех, кто вошёл: у застрявшего друга сессия MAX лежала на диске, а
+    `/users` показывал его на шаге ввода номера.
+    """
+    if user.is_ready:
+        return "работает"
+    if user.chats:
+        return "выбрал чаты, не назначил время"
+    if crypto.has_session(user.telegram_id):
+        return "вошёл, не выбрал чат"
+    if user.phone:
+        return "ввёл номер, ждёт код"
+    return "не начал подключение MAX"
+
+
 @router.message(Command("users"))
 async def on_users(message: Message) -> None:
     if not _is_admin(message):
@@ -340,15 +359,8 @@ async def on_users(message: Message) -> None:
         await message.answer("Пока никого.")
         return
 
-    # Состояние словами: по нему видно, на каком шаге человек застрял
-    where = {
-        "new": "не начал подключение MAX",
-        "connecting": "ввёл номер, ждёт код",
-        "choosing_chat": "вошёл, не выбрал чат",
-        "ready": "работает",
-    }
     lines = [
-        f"<code>{u.telegram_id}</code> @{u.username or '—'} — {where.get(u.state, u.state)}"
+        f"<code>{u.telegram_id}</code> @{u.username or '—'} — {_where(u)}"
         + (f", {len(u.chats)} чат(ов): {u.titles}, сводка в {u.digest_time}" if u.is_ready else "")
         + (" · на паузе" if u.paused else "")
         + (f" · сбоев подряд {u.failures}" if u.failures else "")
