@@ -175,7 +175,7 @@ def _code_question(phone: str, request: max_client.CodeRequest | None) -> str:
     """
     Шаг 3 словами самого MAX: сколько цифр он прислал и сколько попыток оставил.
 
-    Без остатка попыток человек ждёт SMS, которой уже не будет, и решает,
+    Без остатка попыток человек ждёт кода, которого уже не будет, и решает,
     что сломался бот.
     """
     left = request.attempts_left if request else None
