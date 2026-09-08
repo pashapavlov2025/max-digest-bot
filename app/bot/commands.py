@@ -26,7 +26,7 @@ class Asking(StatesGroup):
 async def make_digest(message: Message, days: int) -> None:
     user = _require_user(message)
     if user is None:
-        await message.answer(texts.NOT_REGISTERED)
+        await _deny(message)
         return
     await message.answer(texts.WORKING, reply_markup=MAIN_KEYBOARD)
     await service.send_digest(message.bot, user, hours=days * 24)
@@ -47,7 +47,7 @@ async def on_button_three(message: Message, state: FSMContext) -> None:
 @router.message(F.text == texts.BUTTON_ASK)
 async def on_button_ask(message: Message, state: FSMContext) -> None:
     if _require_user(message) is None:
-        await message.answer(texts.NOT_REGISTERED)
+        await _deny(message)
         return
     await message.answer(texts.ASK_QUESTION)
     await state.set_state(Asking.question)
@@ -64,7 +64,7 @@ async def on_free_question(message: Message, state: FSMContext) -> None:
         return
     user = _require_user(message)
     if user is None:
-        await message.answer(texts.NOT_REGISTERED)
+        await _deny(message)
         return
     question = (message.text or "").strip()
     if not question:
@@ -82,6 +82,28 @@ async def on_button_settings(message: Message, state: FSMContext) -> None:
 def _require_user(message: Message) -> db.User | None:
     user = db.get_user(message.from_user.id)
     return user if user and user.is_ready else None
+
+
+def _not_ready(user: db.User | None) -> str:
+    """
+    Отказ словами про то место, где человек застрял.
+
+    Одинаковое «отправьте /start» на любой стадии однажды отправило друга
+    на повторный вход в MAX, хотя аккаунт был подключён, а не хватало
+    нажатия «Готово» под списком чатов.
+    """
+    if user is None:
+        return texts.NOT_REGISTERED
+    if user.chats:
+        return texts.UNFINISHED_TIME.format(title=user.titles)
+    if crypto.has_session(user.telegram_id):
+        return texts.UNFINISHED_CHATS
+    return texts.UNFINISHED_LOGIN
+
+
+async def _deny(message: Message) -> None:
+    """Ответ на команду, до которой человек ещё не дошёл."""
+    await message.answer(_not_ready(db.get_user(message.from_user.id)))
 
 
 @router.message(Command("help"))
@@ -106,7 +128,7 @@ async def on_about(message: Message) -> None:
 async def on_summary(message: Message, command: CommandObject) -> None:
     user = _require_user(message)
     if user is None:
-        await message.answer(texts.NOT_REGISTERED)
+        await _deny(message)
         return
 
     try:
@@ -122,7 +144,7 @@ async def on_summary(message: Message, command: CommandObject) -> None:
 async def on_question(message: Message, command: CommandObject) -> None:
     user = _require_user(message)
     if user is None:
-        await message.answer(texts.NOT_REGISTERED)
+        await _deny(message)
         return
 
     question = (command.args or "").strip()
@@ -145,7 +167,7 @@ async def on_plan(message: Message) -> None:
     """Что бот запомнил на ближайшие две недели."""
     user = _require_user(message)
     if user is None:
-        await message.answer(texts.NOT_REGISTERED)
+        await _deny(message)
         return
 
     rows = db.calendar_ahead(user.telegram_id)
@@ -162,7 +184,7 @@ async def on_plan(message: Message) -> None:
 async def on_settings(message: Message) -> None:
     user = _require_user(message)
     if user is None:
-        await message.answer(texts.NOT_REGISTERED)
+        await _deny(message)
         return
 
     morning = f"утром в {user.morning_time}" if user.morning else "выключено"
@@ -254,7 +276,7 @@ async def on_reconfigure(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     user = db.get_user(callback.from_user.id)
     if user is None or not user.phone:
-        await callback.message.answer(texts.NOT_REGISTERED)
+        await callback.message.answer(_not_ready(user))
         return
 
     await callback.message.answer("Смотрю, какие есть чаты…")

@@ -105,10 +105,47 @@ async def on_start(message: Message, state: FSMContext, command: CommandObject) 
         await state.set_state(Onboarding.invite)
         return
 
-    # Пользователь есть, но подключение не доведено до конца — продолжаем с начала
-    await message.answer(texts.WELCOME, reply_markup=about_keyboard())
+    # Пользователь есть, но подключение не доведено до конца.
+    # Вход в MAX — самое дорогое место: кодов он даёт считанное число,
+    # и гнать за новым того, у кого сессия уже лежит на диске, нельзя.
+    if user.phone and crypto.has_session(user.telegram_id) and await _resume(message, state, user):
+        return
+
+    await message.answer(texts.CONTINUE_LOGIN, reply_markup=about_keyboard())
     await message.answer(texts.NEED_PASSWORD, reply_markup=_yes_keyboard("Пароль установил", "pw:done"))
     await state.set_state(Onboarding.password_hint)
+
+
+async def _resume(message: Message, state: FSMContext, user: db.User) -> bool:
+    """
+    Продолжает подключение с того места, где оно оборвалось.
+
+    False — сессия не открылась: тогда остаётся обычный путь с новым входом.
+    """
+    if user.chats:
+        db.log_event(user.telegram_id, "resumed", "выбор времени")
+        await message.answer(texts.CHOOSE_TIME.format(title=user.titles), reply_markup=time_keyboard())
+        await state.set_state(Onboarding.time)
+        return True
+
+    await message.answer(texts.RESUMING)
+    try:
+        chats = await max_client.list_chats(user.telegram_id, user.phone)
+    except Exception as exc:  # noqa: BLE001 — сессия могла и правда отвалиться
+        log.warning("не вышло продолжить подключение %s: %s", user.telegram_id, exc)
+        db.log_event(user.telegram_id, "resume_failed", str(exc))
+        return False
+
+    db.update_user(user.telegram_id, state="choosing_chat")
+    db.log_event(user.telegram_id, "resumed", "выбор чатов")
+    if not chats:
+        await message.answer(texts.NO_CHATS)
+        await state.clear()
+        return True
+
+    await show_chat_picker(message, state, chats, texts.CHOOSE_CHAT)
+    await state.set_state(Onboarding.chat)
+    return True
 
 
 @router.message(Onboarding.invite)
@@ -402,7 +439,8 @@ async def on_chat_toggle(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer(f"Убрал «{title}»")
     else:
         picked[key] = title
-        await callback.answer(f"Добавил «{title}»")
+        # Галочка похожа на завершённое действие, а чаты сохраняет только «Готово»
+        await callback.answer(f"Добавил «{title}» · дальше «Готово» под списком")
 
     await state.update_data(picked=picked)
     text, keyboard = _picker_view(data.get("shown") or [], picked, data.get("header") or texts.CHOOSE_CHAT_AGAIN)
