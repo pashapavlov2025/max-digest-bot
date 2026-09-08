@@ -10,6 +10,7 @@
 import asyncio
 import logging
 import random
+import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -28,8 +29,8 @@ ENOUGH_SAMPLES = 24
 
 
 async def run(bot: Bot) -> None:
-    """Запускает оба цикла: минутный по расписанию и часовой по всплескам."""
-    await asyncio.gather(_timetable(bot), _bursts(bot))
+    """Запускает три цикла: расписание, всплески и присмотр за входом."""
+    await asyncio.gather(_timetable(bot), _bursts(bot), _watchdog(bot))
 
 
 async def _timetable(bot: Bot) -> None:
@@ -164,3 +165,133 @@ async def _check_user(bot: Bot, user: db.User) -> None:
         await service.send_burst(bot, user, chat, hours=BURST_DIGEST_HOURS)
         # Дальше по этому пользователю уже пауза — остальные чаты подождут вечера
         return
+
+
+# --- Присмотр за входом ---
+#
+# Вход ломается тише всех остальных частей: у подключённых людей сводки идут,
+# а новичок упирается в стену и пишет «код не приходит». Так и было в сентябре
+# 2026, когда MAX перестал обслуживать версию клиента, зашитую в библиотеке:
+# запрос кода принимался, код не отправлялся, в журнале ни одной ошибки.
+# Поэтому проверяем сами и жалуемся админам, а не ждём жалобы от новичка.
+
+
+async def _watchdog(bot: Bot) -> None:
+    """
+    Раз в сутки смотрит, не устарела ли версия клиента и доходят ли коды.
+
+    Внешний try не для красоты: этот цикл живёт в одной `gather` со сводками,
+    и упавшая проверка утащила бы за собой рассылку. Присмотр важен, но не
+    настолько, чтобы ради него терять то, ради чего бот запущен.
+    """
+    try:
+        if not config.watchdog_time:
+            log.info("присмотр за входом выключен")
+            return
+        zone = ZoneInfo(config.timezone)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("присмотр за входом не запустился: %s", exc)
+        return
+    done: str | None = None
+
+    while True:
+        try:
+            now = datetime.now(zone)
+            today = now.strftime("%Y-%m-%d")
+            if now.strftime("%H:%M") == config.watchdog_time and done != today:
+                done = today
+                await _check_version(bot)
+                await _check_delivery(bot)
+        except Exception as exc:  # noqa: BLE001
+            log.exception("сбой присмотра за входом: %s", exc)
+
+        await asyncio.sleep(60)
+
+
+async def _check_version(bot: Bot) -> None:
+    """
+    Не отстали ли мы от живых версий MAX.
+
+    Проверка дешёвая и без следов: сверяем, чем представляемся, со списком
+    свежих сборок. Именно это отставание и сломало вход в сентябре.
+    """
+    try:
+        newest = await max_client.newest_versions()
+    except Exception as exc:  # noqa: BLE001 — каталог по сети, он может и не ответить
+        log.warning("не смог узнать свежие версии MAX: %s", exc)
+        return
+
+    if max_client.APP_VERSION in newest:
+        log.info("версия клиента %s в числе свежих", max_client.APP_VERSION)
+        return
+
+    versions = ", ".join(newest)
+    db.log_event(None, "version_stale", f"{max_client.APP_VERSION}, свежие: {versions}")
+    await service.notify_admins(
+        bot,
+        "⚠️ Версия клиента MAX устарела.\n\n"
+        f"Мы представляемся {max_client.APP_VERSION}, а свежие сейчас: {versions}.\n\n"
+        "Пока вход работает, но именно так он и сломался в прошлый раз: MAX "
+        "перестаёт отправлять коды, не показывая ошибки. Стоит поднять "
+        "APP_VERSION в app/max_client.py.",
+    )
+
+
+async def _check_delivery(bot: Bot) -> None:
+    """
+    Настоящая проверка: просим код себе и смотрим, дошёл ли он.
+
+    Дёргаем нечасто — каждая проверка кладёт админу в MAX сообщение «кто-то
+    пытается войти», и делать это ежедневно незачем. Зато она отвечает на
+    вопрос, который иначе не проверить ничем: коды доходят или нет.
+    """
+    days = config.watchdog_canary_days
+    if days <= 0:
+        return
+
+    last = db.last_event_at("delivery_ok") or db.last_event_at("delivery_failed")
+    if last:
+        try:
+            when = datetime.fromisoformat(last).replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - when < timedelta(days=days):
+                return
+        except ValueError:
+            pass
+
+    user = next(
+        (u for u in db.ready_users() if u.telegram_id in config.admin_ids and u.phone), None
+    )
+    if not user:
+        log.info("проверять доставку кода не на ком: у админов нет подключённого MAX")
+        return
+
+    since_ms = time.time() * 1000
+    request = await max_client.probe_code(user.phone)
+    if request is None:
+        db.log_event(user.telegram_id, "delivery_failed", "MAX не принял запрос кода")
+        await service.notify_admins(bot, "⚠️ MAX не принял запрос кода — вход, похоже, сломан.")
+        return
+
+    # Доставка занимает секунды, но пусть у MAX будет запас
+    await asyncio.sleep(45)
+
+    try:
+        arrived = await max_client.code_arrived(user.telegram_id, user.phone, since_ms)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("не смог проверить доставку кода: %s", exc)
+        return
+
+    if arrived:
+        db.log_event(user.telegram_id, "delivery_ok", str(request))
+        log.info("проверка доставки кода: код дошёл")
+        return
+
+    db.log_event(user.telegram_id, "delivery_failed", str(request))
+    await service.notify_admins(
+        bot,
+        "⚠️ Код входа не дошёл.\n\n"
+        f"MAX принял запрос ({request}), но сообщение с кодом в мессенджере "
+        "не появилось. Значит новые люди подключиться не смогут, хотя у всех "
+        "подключённых сводки идут как обычно.\n\n"
+        f"Первым делом стоит проверить версию клиента: сейчас {max_client.APP_VERSION}.",
+    )

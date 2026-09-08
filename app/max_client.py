@@ -10,6 +10,7 @@
 
 import asyncio
 import logging
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -406,3 +407,89 @@ async def count_recent(telegram_id: int, phone: str, chat_ids: list[int], minute
             await client.close()
 
     return counts
+
+
+# --- Присмотр за доставкой кодов ---
+#
+# MAX не сообщает, что разлюбил нашу версию: запрос кода он принимает как ни
+# в чём не бывало и просто не отправляет код. Сломанный вход при этом не виден
+# ниоткуда — сводки у тех, кто уже подключился, продолжают идти. В сентябре
+# 2026 это стоило двух дней разбирательств, поэтому теперь проверяем сами.
+
+# По этим словам узнаём сообщение с кодом среди прочих диалогов
+CODE_MARKERS = ("профиль MAX", "Код:")
+
+
+async def newest_versions(count: int = 3) -> list[str]:
+    """Самые свежие версии клиента по мнению удалённого каталога."""
+    catalog = VersionCatalog(remote=True)
+    await catalog.load()
+    ranked = sorted(catalog.versions.items(), key=lambda kv: kv[1].build_number, reverse=True)
+    return [version for version, _ in ranked[:count]]
+
+
+async def probe_code(phone: str) -> CodeRequest | None:
+    """
+    Просит у MAX код и на этом останавливается.
+
+    Вход не завершаем: нам нужен только сам факт, что запрос принят, — и повод
+    посмотреть, дошло ли сообщение. Сессия здесь одноразовая и в никуда.
+    """
+    code_requests.pop(phone, None)
+    provider = QueueProvider(timeout=30)
+
+    with tempfile.TemporaryDirectory(prefix="max-probe-") as work_dir:
+        catalog, version = await _version()
+        client = Client(
+            phone=phone,
+            work_dir=work_dir,
+            sms_code_provider=provider,
+            password_provider=provider,
+            app_version=version,
+            catalog=catalog,
+        )
+        task = asyncio.create_task(client.connect())
+        try:
+            for _ in range(60):
+                if phone in code_requests:
+                    break
+                await asyncio.sleep(0.5)
+        finally:
+            task.cancel()
+            try:
+                await client.close()
+            except Exception:  # noqa: BLE001 — на выходе ошибки уже не важны
+                pass
+
+    return code_requests.pop(phone, None)
+
+
+async def code_arrived(telegram_id: int, phone: str, since_ms: float) -> bool:
+    """
+    Дошло ли до человека сообщение с кодом после момента `since_ms`.
+
+    Коды MAX кладёт в диалог с ботом «Коды подтверждения», а туда мы попадаем
+    той же сессией, что читаем чаты. Групп не касаемся: код приходит в личку.
+    """
+    with crypto.session_workdir(telegram_id) as work_dir:
+        catalog, version = await _version()
+        client = Client(
+            phone=phone, work_dir=str(work_dir), app_version=version, catalog=catalog
+        )
+        await client.connect()
+        try:
+            for chat in await client.fetch_chats():
+                if not str(chat.type or "").upper().endswith("DIALOG"):
+                    continue
+                page = await client.fetch_history(chat_id=chat.id, backward=5)
+                for message in page or []:
+                    if (message.time or 0) < since_ms:
+                        continue
+                    text = getattr(message, "text", "") or ""
+                    if any(marker in text for marker in CODE_MARKERS):
+                        return True
+                await asyncio.sleep(0.2)
+        finally:
+            await client.close()
+
+    return False

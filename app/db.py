@@ -679,3 +679,12 @@ def recent_events(limit: int = 30, telegram_id: int | None = None) -> list[dict]
             values,
         ).fetchall()
     return [dict(row) for row in rows]
+
+
+def last_event_at(kind: str) -> str | None:
+    """Когда в последний раз случалось событие такого рода."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT at FROM events WHERE kind = ? ORDER BY id DESC LIMIT 1", (kind,)
+        ).fetchone()
+    return row["at"] if row else None

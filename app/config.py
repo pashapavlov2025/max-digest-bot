@@ -28,6 +28,16 @@ class Config:
     def about_url(self) -> str:
         return os.environ.get("ABOUT_URL", "https://pashapavlov2025.github.io/max-digest-bot/").strip()
 
+    # Присмотр за доставкой кодов: во сколько проверять и как часто дёргать
+    # настоящий код. Пустое значение выключает проверки целиком.
+    @property
+    def watchdog_time(self) -> str:
+        return os.environ.get("WATCHDOG_TIME", "05:40").strip()
+
+    @property
+    def watchdog_canary_days(self) -> int:
+        return int(os.environ.get("WATCHDOG_CANARY_DAYS", "7"))
+
     # --- Хранилище ---
     # Каталоги с данными закрыты от посторонних локальных пользователей:
     # внутри сессии чужих мессенджеров и выжимки из переписки
