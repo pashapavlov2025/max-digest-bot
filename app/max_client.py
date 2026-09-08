@@ -15,10 +15,49 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pymax import Client
+from pymax.versions.catalog import VersionCatalog
 
 from . import crypto, vision
 
 log = logging.getLogger(__name__)
+
+# Версия, которой мы представляемся MAX.
+#
+# Это не косметика. MAX молча выбрасывает запросы кода от устаревших версий:
+# запрос принимается, в ответе честные «шесть цифр, минута», а код не уходит
+# никуда — ни SMS, ни в мессенджер. Зашитая в библиотеке 26.25.0 отвалилась
+# в начале сентября 2026, и вход перестал работать у всех (PyMax issue #99).
+# Проверено вживую: 26.28.0, 26.29.0 и 26.30.1 доставляют код, 26.25.0 — нет.
+#
+# Отпечатки свежих сборок библиотека держит не у себя, а в удалённом каталоге,
+# поэтому версию нельзя просто написать строкой — нужен и каталог.
+APP_VERSION = "26.30.1"
+
+_catalog: VersionCatalog | None = None
+
+
+async def _version() -> tuple[VersionCatalog, str]:
+    """
+    Каталог отпечатков и версия, с которыми ходим в MAX.
+
+    Каталог тянется по сети один раз на процесс. Если сеть подвела, откатываемся
+    на встроенный: вход по коду с ним не работает, но чтение чатов живой сессией
+    не сломается — а это то, ради чего бот и запущен.
+    """
+    global _catalog
+
+    if _catalog is None:
+        catalog = VersionCatalog(remote=True)
+        try:
+            await catalog.load()
+            catalog.remote = False  # дальше клиент в сеть за этим не ходит
+            catalog.resolve(APP_VERSION)
+        except Exception as exc:  # noqa: BLE001 — сеть или каталог, лечится откатом
+            log.warning("не удалось получить каталог версий MAX: %s", exc)
+            return VersionCatalog(), VersionCatalog.recommended()
+        _catalog = catalog
+
+    return _catalog, APP_VERSION
 
 
 @dataclass
@@ -179,11 +218,14 @@ class LoginFlow:
     async def start(self) -> None:
         # Цифры прошлой попытки не должны выдать себя за свежие
         code_requests.pop(self.phone, None)
+        catalog, version = await _version()
         self.client = Client(
             phone=self.phone,
             work_dir=str(self.work_dir),
             sms_code_provider=self.sms,
             password_provider=self.password,
+            app_version=version,
+            catalog=catalog,
         )
         self.task = asyncio.create_task(self._run())
 
@@ -238,7 +280,10 @@ async def list_chats(telegram_id: int, phone: str) -> list[dict]:
     по ним человек опознаёт нужный чат надёжнее, чем по имени.
     """
     with crypto.session_workdir(telegram_id) as work_dir:
-        client = Client(phone=phone, work_dir=str(work_dir))
+        catalog, version = await _version()
+        client = Client(
+            phone=phone, work_dir=str(work_dir), app_version=version, catalog=catalog
+        )
         await client.connect()
         try:
             chats = await client.fetch_chats()
@@ -270,7 +315,10 @@ async def fetch_window(telegram_id: int, phone: str, chat_id: int, hours: int, l
     since_ms = (time.time() - hours * 3600) * 1000
 
     with crypto.session_workdir(telegram_id) as work_dir:
-        client = Client(phone=phone, work_dir=str(work_dir))
+        catalog, version = await _version()
+        client = Client(
+            phone=phone, work_dir=str(work_dir), app_version=version, catalog=catalog
+        )
         await client.connect()
         try:
             collected: dict[int, object] = {}
@@ -344,7 +392,10 @@ async def count_recent(telegram_id: int, phone: str, chat_ids: list[int], minute
     counts: dict[int, int] = {}
 
     with crypto.session_workdir(telegram_id) as work_dir:
-        client = Client(phone=phone, work_dir=str(work_dir))
+        catalog, version = await _version()
+        client = Client(
+            phone=phone, work_dir=str(work_dir), app_version=version, catalog=catalog
+        )
         await client.connect()
         try:
             for chat_id in chat_ids:
