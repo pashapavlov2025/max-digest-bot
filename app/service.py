@@ -1,6 +1,7 @@
 """Сборка и доставка сводок — общее для расписания и команд бота."""
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -275,6 +276,8 @@ async def answer_question(
 
 # Больше десятка снимков подряд — это уже не «посмотреть», а засыпать ленту
 PHOTOS_SHOWN = 10
+# С какого возраста окна называем его датами, а не «последними сутками»
+STALE_AFTER = 30 * 60
 
 
 def _photo_caption(item: dict) -> str:
@@ -284,24 +287,40 @@ def _photo_caption(item: dict) -> str:
     return f"{line}\n{digest.esc(item['caption'])}" if item["caption"] else line
 
 
-async def send_photos(bot: Bot, user: db.User, chat: db.Chat, hours: int) -> int:
+def _window_words(hours: int, until: float | None) -> str:
     """
-    Пересылает последние фотографии чата — человек смотрит их сам.
+    Как назвать окно человеку.
+
+    Свежее — «последние сутки», так короче и понятнее. Давно закончившееся
+    называем датами: под сводкой трёхдневной давности «последние сутки»
+    означали бы совсем другие сутки.
+    """
+    if not until or time.time() - until < STALE_AFTER:
+        return digest.period_label(hours)
+    return digest.window_label(hours, until)
+
+
+async def send_photos(
+    bot: Bot, user: db.User, chat: db.Chat, hours: int, until: float | None = None
+) -> int:
+    """
+    Пересылает фотографии чата за окно — человек смотрит их сам.
 
     Модель к ним не зовём: по замеру из `vision` большинство снимков в чате
     пересказывать нечего, а тут и незачем — смотрит человек.
 
     К какой строке сводки относится фото, не угадываем: сводка — проза модели,
-    привязать к ней картинку честно не выйдет. Показываем последние за то же
-    окно, под которым стояла кнопка.
+    привязать к ней картинку честно не выйдет. Показываем всё за то окно, под
+    которым стояла кнопка, — включая его правый край: сводка живёт в переписке
+    вечно, и нажатая через неделю кнопка должна показать те же сутки.
     """
     if not user.phone:
         return 0
 
-    period = digest.period_label(hours)
+    period = _window_words(hours, until)
     try:
         photos = await max_client.fetch_photos(
-            user.telegram_id, user.phone, chat.chat_id, hours, PHOTOS_SHOWN
+            user.telegram_id, user.phone, chat.chat_id, hours, PHOTOS_SHOWN, until
         )
     except Exception as exc:  # noqa: BLE001
         await report_failure(bot, user, exc, where=chat.title, announce=True)

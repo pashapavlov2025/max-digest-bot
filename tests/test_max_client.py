@@ -179,6 +179,45 @@ async def test_фото_старше_окна_не_показываются(monk
     assert [p["photo_id"] for p in got] == [7]
 
 
+async def test_окно_с_заданным_краем_берёт_своё_а_не_последнее(monkeypatch):
+    """
+    Кнопка под позавчерашней сводкой должна показать позавчерашнее.
+
+    Вчерашние и сегодняшние снимки в это окно не входят, хотя они свежее.
+    """
+    # Окно «сутки, кончившиеся двое суток назад» — это от 72 до 48 часов назад
+    fakes.install(monkeypatch, FakeMax([
+        message(1, minutes_ago=80 * 60, attaches=[photo(1)]),   # старше окна
+        message(2, minutes_ago=70 * 60, attaches=[photo(2)]),   # в окне
+        message(3, minutes_ago=50 * 60, attaches=[photo(3)]),   # в окне
+        message(4, minutes_ago=40 * 60, attaches=[photo(4)]),   # свежее окна
+        message(5, minutes_ago=60, attaches=[photo(5)]),        # свежее окна
+    ]))
+    two_days_ago = time.time() - 48 * 3600
+
+    got = await max_client.fetch_photos(1, "+7", -100, hours=24, limit=10, until=two_days_ago)
+
+    assert [p["photo_id"] for p in got] == [2, 3]
+
+
+async def test_к_старому_окну_идём_сразу_от_его_края(monkeypatch):
+    """MAX умеет отдавать историю с заданного момента — вычитывать всё с тех пор незачем."""
+    client = fakes.install(monkeypatch, FakeMax(history(400, step_minutes=1, with_photos=True)))
+
+    await max_client.fetch_photos(1, "+7", -100, hours=1, limit=10, until=time.time() - 5 * 3600)
+
+    assert client.pages <= 2, f"страниц {client.pages}: пошли вглубь от начала вместо края окна"
+
+
+async def test_без_края_окно_кончается_сейчас(monkeypatch):
+    fakes.install(monkeypatch, FakeMax([
+        message(1, minutes_ago=60 * 50, attaches=[photo(1)]),
+        message(2, minutes_ago=5, attaches=[photo(2)]),
+    ]))
+    got = await max_client.fetch_photos(1, "+7", -100, hours=24, limit=10)
+    assert [p["photo_id"] for p in got] == [2]
+
+
 async def test_несколько_фото_в_одном_сообщении_считаются_отдельно(monkeypatch):
     fakes.install(monkeypatch, FakeMax([
         message(1, minutes_ago=5, text="вот", attaches=[photo(7), photo(8)])

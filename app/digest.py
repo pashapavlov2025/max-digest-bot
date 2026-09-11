@@ -39,16 +39,20 @@ def period_label(hours: int) -> str:
     return f"последние {round(hours / 24)} дн."
 
 
-def window_label(hours: int) -> str:
+def window_label(hours: int, until: float | None = None) -> str:
     """
     Границы окна словами.
 
     «Сутки» — это последние 24 часа, а не сегодняшний день: вечерняя сводка
     захватывает вчерашний вечер. Пока об этом не сказано, человек сверяет
     счётчик с тем, что видит в чате за сегодня, и числа не сходятся.
+
+    `until` — правый край окна в секундах; по умолчанию «сейчас». Пригождается
+    кнопке под старой сводкой: там окно давно кончилось, и называть его
+    «последними сутками» было бы враньём.
     """
     zone = ZoneInfo(config.timezone)
-    until = datetime.now(zone)
+    until = datetime.fromtimestamp(until, zone) if until else datetime.now(zone)
     since = until - timedelta(hours=hours)
     if since.date() == until.date():
         return f"за {since:%H:%M}–{until:%H:%M}"

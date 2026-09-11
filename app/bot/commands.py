@@ -72,8 +72,14 @@ async def on_ask_this_chat(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("pics:"))
 async def on_show_photos(callback: CallbackQuery) -> None:
-    """Фотографии чата за то же окно, под которым стояла кнопка."""
-    _, key, hours = callback.data.split(":")
+    """
+    Фотографии чата за то окно, под которым стояла кнопка.
+
+    Правого края может не быть: кнопки первого выпуска несли только длину
+    окна. Такие сводки лежат у людей в переписке и должны работать дальше —
+    для них край остаётся прежним, «сейчас».
+    """
+    _, key, hours, *rest = callback.data.split(":")
     user = db.get_user(callback.from_user.id)
     chat = _chat_of(user, key)
     if chat is None:
@@ -82,7 +88,7 @@ async def on_show_photos(callback: CallbackQuery) -> None:
 
     # Отвечаем сразу: скачивание идёт минуту, а Telegram ждёт ответа секунды
     await callback.answer("Собираю фото…")
-    await service.send_photos(callback.bot, user, chat, int(hours))
+    await service.send_photos(callback.bot, user, chat, int(hours), int(rest[0]) if rest else None)
 
 
 def _chat_of(user: db.User | None, key: str) -> db.Chat | None:

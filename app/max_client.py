@@ -328,15 +328,21 @@ async def list_chats(telegram_id: int, phone: str) -> list[dict]:
     return sorted(groups, key=lambda c: c["last_event"], reverse=True)
 
 
-async def _history(client: Client, chat_id: int, since_ms: float, limit: int) -> list:
+async def _history(
+    client: Client, chat_id: int, since_ms: float, limit: int, until_ms: float | None = None
+) -> list:
     """
     Страницы истории чата до границы окна.
 
     MAX отдаёт максимум 100 штук за запрос, поэтому идём вглубь страницами:
     курсором служит время самого старого сообщения предыдущей страницы.
+
+    `until_ms` — правый край окна. Он же начальный курсор: чтобы добраться до
+    позавчерашнего окна, незачем вычитывать всё, что пришло с тех пор, — MAX
+    умеет отдавать историю начиная с заданного момента.
     """
     collected: dict[int, object] = {}
-    cursor: float | None = None
+    cursor: float | None = until_ms
 
     for _ in range(MAX_PAGES):
         options = {"chat_id": chat_id, "backward": PAGE}
@@ -411,23 +417,32 @@ async def fetch_window(telegram_id: int, phone: str, chat_id: int, hours: int, l
         return messages
 
 
-async def fetch_photos(telegram_id: int, phone: str, chat_id: int, hours: int, limit: int) -> list[dict]:
+async def fetch_photos(
+    telegram_id: int, phone: str, chat_id: int, hours: int, limit: int, until: float | None = None
+) -> list[dict]:
     """
-    Последние фотографии чата — со свежими ссылками.
+    Фотографии чата за окно — со свежими ссылками.
 
     Ссылки MAX подписывает сроком, поэтому хранить их негде: перед пересылкой
     окно читается заново, и ссылка живёт ровно до скачивания.
+
+    `until` — правый край окна в секундах, по умолчанию «сейчас». Задаётся он
+    ради кнопки под сводкой: сводка описывает конкретные сутки, и нажатая через
+    два дня кнопка должна показать те же сутки, а не последние.
     """
-    since_ms = _since_ms(hours)
+    until_ms = until * 1000 if until else None
+    since_ms = (until - hours * 3600) * 1000 if until else _since_ms(hours)
 
     async with _session(telegram_id, phone) as client:
-        history = await _history(client, chat_id, since_ms, config.max_messages)
+        history = await _history(client, chat_id, since_ms, config.max_messages, until_ms)
         names = await _names(client, history)
 
         photos = []
         for message in history:
             seconds = _seconds(message)
             if not seconds or seconds * 1000 < since_ms:
+                continue
+            if until_ms and seconds * 1000 > until_ms:
                 continue
             for photo_id, url in photo_links(message):
                 photos.append(

@@ -7,6 +7,7 @@
 """
 
 import json
+import time
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -65,7 +66,11 @@ async def test_под_сводкой_стоят_кнопки_этого_чата
 
     keyboard = bot.messages[-1][2]
     data = [b.callback_data for row in keyboard.inline_keyboard for b in row]
-    assert data == [f"ask:{chat.chat_id}", f"pics:{chat.chat_id}:72"]
+    assert data[0] == f"ask:{chat.chat_id}"
+
+    kind, key, hours, until = data[1].split(":")
+    assert (kind, key, hours) == ("pics", str(chat.chat_id), "72")
+    assert abs(int(until) - time.time()) < 5, "край окна — момент сборки сводки"
 
 
 async def test_без_телефона_и_чатов_сводка_не_собирается(bot):
@@ -298,6 +303,41 @@ async def test_подпись_из_чата_едет_под_фотографие
     await service.send_photos(bot, user, chat, hours=24)
 
     assert "такую тетрадь?" in bot.photos[0][2]
+
+
+async def test_свежее_окно_называется_коротко():
+    assert service._window_words(24, None) == "последние сутки"
+    assert service._window_words(24, time.time()) == "последние сутки"
+
+
+async def test_давно_кончившееся_окно_называется_датами():
+    """Под сводкой трёхдневной давности «последние сутки» — это другие сутки."""
+    words = service._window_words(24, time.time() - 3 * 86400)
+    assert words.startswith("с ") and " по " in words
+
+
+async def test_под_старой_сводкой_заголовок_называет_даты(monkeypatch, bot, user, chat):
+    photos_in(monkeypatch, 7, minutes_ago=60 * 70)
+    monkeypatch.setattr(service.max_client, "download_photo", _gives(b"jpeg"))
+    three_days_ago = time.time() - 3 * 86400
+
+    await service.send_photos(bot, user, chat, hours=24, until=three_days_ago)
+
+    assert "последние сутки" not in bot.messages[0][1]
+    assert " по " in bot.messages[0][1], "окно названо датами"
+
+
+async def test_край_окна_доходит_до_чтения(monkeypatch, bot, user, chat):
+    seen = {}
+
+    async def fetch_photos(telegram_id, phone, chat_id, hours, limit, until=None):
+        seen["hours"], seen["until"] = hours, until
+        return []
+
+    monkeypatch.setattr(service.max_client, "fetch_photos", fetch_photos)
+    await service.send_photos(bot, user, chat, hours=72, until=1_757_600_000)
+
+    assert seen == {"hours": 72, "until": 1_757_600_000}
 
 
 async def test_фотографий_нет_говорим_словами(monkeypatch, bot, user, chat):

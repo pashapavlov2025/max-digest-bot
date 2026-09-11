@@ -6,6 +6,8 @@
 протечёт или потеряется, вопрос молча уйдёт не туда.
 """
 
+import time
+
 import pytest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
@@ -39,8 +41,8 @@ def shown(monkeypatch) -> list:
     """Перехватывает просьбы показать фотографии."""
     calls = []
 
-    async def send_photos(bot, user, chat, hours):
-        calls.append({"chat": chat, "hours": hours})
+    async def send_photos(bot, user, chat, hours, until=None):
+        calls.append({"chat": chat, "hours": hours, "until": until})
         return 0
 
     monkeypatch.setattr(service, "send_photos", send_photos)
@@ -51,9 +53,24 @@ def shown(monkeypatch) -> list:
 
 
 def test_кнопки_несут_чат_и_окно():
-    keyboard = keyboards.under_digest(-100, 72)
+    keyboard = keyboards.under_digest(-100, 72, until=1_757_600_000)
     data = [b.callback_data for row in keyboard.inline_keyboard for b in row]
-    assert data == ["ask:-100", "pics:-100:72"]
+    assert data == ["ask:-100", "pics:-100:72:1757600000"]
+
+
+def test_кнопка_помечается_текущим_моментом():
+    """Правый край окна — это когда сводку собрали."""
+    keyboard = keyboards.under_digest(-100, 24)
+    stamp = int(keyboard.inline_keyboard[1][0].callback_data.split(":")[3])
+    assert abs(stamp - time.time()) < 5
+
+
+def test_callback_влезает_в_лимит_телеграма():
+    """Шестьдесят четыре байта — предел, за ним Telegram кнопку не примет."""
+    keyboard = keyboards.under_digest(-1001234567890123, 336)
+    for row in keyboard.inline_keyboard:
+        for button in row:
+            assert len(button.callback_data.encode()) <= 64
 
 
 async def test_кнопка_спросить_запоминает_чат(bot, user, state):
@@ -124,29 +141,43 @@ async def test_кнопка_после_смены_списка_чатов_отк
 
 
 async def test_кнопка_фото_несёт_свой_чат_и_окно(bot, user, shown):
-    callback = FakeCallback(bot, "pics:-200:72")
+    callback = FakeCallback(bot, "pics:-200:72:1757600000")
 
     await commands.on_show_photos(callback)
 
     assert shown[0]["chat"].chat_id == -200
     assert shown[0]["hours"] == 72
+    assert shown[0]["until"] == 1_757_600_000
+
+
+async def test_кнопка_первого_выпуска_продолжает_работать(bot, user, shown):
+    """
+    Сводки с трёхпольной кнопкой уже лежат у людей в переписке.
+
+    Края окна в них нет — значит, край прежний, «сейчас». Сломать их нельзя:
+    в переписке они остаются навсегда.
+    """
+    await commands.on_show_photos(FakeCallback(bot, "pics:-100:24"))
+
+    assert shown[0]["hours"] == 24
+    assert shown[0]["until"] is None
 
 
 async def test_кнопка_фото_сразу_отвечает_телеграму(bot, user, shown):
     """Скачивание идёт минуту, а Telegram ждёт ответа секунды."""
-    callback = FakeCallback(bot, "pics:-100:24")
+    callback = FakeCallback(bot, "pics:-100:24:1757600000")
     await commands.on_show_photos(callback)
     assert callback.toast, "кнопка должна перестать крутиться до начала работы"
 
 
 async def test_кнопка_фото_чужого_чата_отказывает(bot, user, shown):
-    callback = FakeCallback(bot, "pics:-999:24")
+    callback = FakeCallback(bot, "pics:-999:24:1757600000")
     await commands.on_show_photos(callback)
     assert callback.alerted and shown == []
 
 
 async def test_неготовому_пользователю_кнопки_не_работают(bot, shown):
     db.create_user(500, "новичок")
-    callback = FakeCallback(bot, "pics:-100:24")
+    callback = FakeCallback(bot, "pics:-100:24:1757600000")
     await commands.on_show_photos(callback)
     assert callback.alerted and shown == []
