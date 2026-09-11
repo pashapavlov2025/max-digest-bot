@@ -31,7 +31,7 @@ from . import texts
 from .keyboards import MAIN as MAIN_KEYBOARD
 
 log = logging.getLogger(__name__)
-router = Router()
+router = Router(name="onboarding")
 
 # Незавершённые входы в MAX: живут в памяти, пока человек вводит код и пароль
 logins: dict[int, max_client.LoginFlow] = {}

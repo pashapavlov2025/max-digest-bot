@@ -12,13 +12,16 @@ import asyncio
 import logging
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import httpx
 from pymax import Client
 from pymax.versions.catalog import VersionCatalog
 
 from . import crypto, vision
+from .config import config
 
 log = logging.getLogger(__name__)
 
@@ -272,6 +275,32 @@ class LoginFlow:
             self.task.cancel()
 
 
+def _since_ms(hours: float) -> float:
+    """Граница окна в миллисекундах — в них MAX отдаёт время сообщения."""
+    return (time.time() - hours * 3600) * 1000
+
+
+@asynccontextmanager
+async def _session(telegram_id: int, phone: str):
+    """
+    Подключённый клиент MAX на время одной операции.
+
+    Отдельным менеджером — чтобы чтение истории, подсчёт всплеска и выборка
+    фотографий не заводили каждый свой вход: лишние входы MAX считает поводом
+    для подозрений.
+    """
+    with crypto.session_workdir(telegram_id) as work_dir:
+        catalog, version = await _version()
+        client = Client(
+            phone=phone, work_dir=str(work_dir), app_version=version, catalog=catalog
+        )
+        await client.connect()
+        try:
+            yield client
+        finally:
+            await client.close()
+
+
 async def list_chats(telegram_id: int, phone: str) -> list[dict]:
     """
     Группы и каналы аккаунта с приметами для выбора.
@@ -280,105 +309,163 @@ async def list_chats(telegram_id: int, phone: str) -> list[dict]:
     Поэтому отдаём ещё число участников и время последнего сообщения,
     по ним человек опознаёт нужный чат надёжнее, чем по имени.
     """
-    with crypto.session_workdir(telegram_id) as work_dir:
-        catalog, version = await _version()
-        client = Client(
-            phone=phone, work_dir=str(work_dir), app_version=version, catalog=catalog
+    async with _session(telegram_id, phone) as client:
+        chats = await client.fetch_chats()
+
+    groups = []
+    for chat in chats:
+        if not chat.title or str(chat.type or "").upper() not in {"CHAT", "CHANNEL", "GROUP"}:
+            continue
+        groups.append(
+            {
+                "id": chat.id,
+                "title": chat.title,
+                "participants": chat.participants_count or 0,
+                "last_event": chat.last_event_time or 0,
+            }
         )
-        await client.connect()
-        try:
-            chats = await client.fetch_chats()
-            groups = []
-            for chat in chats:
-                if not chat.title or str(chat.type or "").upper() not in {"CHAT", "CHANNEL", "GROUP"}:
-                    continue
-                groups.append(
-                    {
-                        "id": chat.id,
-                        "title": chat.title,
-                        "participants": chat.participants_count or 0,
-                        "last_event": chat.last_event_time or 0,
-                    }
-                )
-            # Самые живые сверху: нужный чат почти всегда среди них
-            return sorted(groups, key=lambda c: c["last_event"], reverse=True)
-        finally:
-            await client.close()
+    # Самые живые сверху: нужный чат почти всегда среди них
+    return sorted(groups, key=lambda c: c["last_event"], reverse=True)
 
 
-async def fetch_window(telegram_id: int, phone: str, chat_id: int, hours: int, limit: int) -> list[dict]:
+async def _history(client: Client, chat_id: int, since_ms: float, limit: int) -> list:
     """
-    Сообщения чата за последние `hours` часов.
+    Страницы истории чата до границы окна.
 
     MAX отдаёт максимум 100 штук за запрос, поэтому идём вглубь страницами:
     курсором служит время самого старого сообщения предыдущей страницы.
     """
-    since_ms = (time.time() - hours * 3600) * 1000
+    collected: dict[int, object] = {}
+    cursor: float | None = None
 
-    with crypto.session_workdir(telegram_id) as work_dir:
-        catalog, version = await _version()
-        client = Client(
-            phone=phone, work_dir=str(work_dir), app_version=version, catalog=catalog
-        )
-        await client.connect()
-        try:
-            collected: dict[int, object] = {}
-            cursor: float | None = None
+    for _ in range(MAX_PAGES):
+        options = {"chat_id": chat_id, "backward": PAGE}
+        if cursor is not None:
+            options["from_time"] = cursor
+        page = await client.fetch_history(**options)
+        if not page:
+            break
 
-            for _ in range(MAX_PAGES):
-                options = {"chat_id": chat_id, "backward": PAGE}
-                if cursor is not None:
-                    options["from_time"] = cursor
-                page = await client.fetch_history(**options)
-                if not page:
-                    break
+        fresh = [m for m in page if m.id not in collected]
+        collected.update({m.id: m for m in page})
+        times = [m.time for m in page if m.time]
+        if not fresh or not times:
+            break
 
-                fresh = [m for m in page if m.id not in collected]
-                collected.update({m.id: m for m in page})
-                times = [m.time for m in page if m.time]
-                if not fresh or not times:
-                    break
+        oldest = min(times)
+        if oldest <= since_ms or oldest == cursor or len(collected) >= limit:
+            break
+        cursor = oldest
+        await asyncio.sleep(0.3)
 
-                oldest = min(times)
-                if oldest <= since_ms or oldest == cursor or len(collected) >= limit:
-                    break
-                cursor = oldest
-                await asyncio.sleep(0.3)
+    return list(collected.values())
 
-            history = list(collected.values())
-            senders = {m.sender for m in history if m.sender}
-            users = await client.get_users(list(senders)) if senders else []
-            names = {u.id: (u.names[0].name if u.names else str(u.id)) for u in users}
 
-            messages = []
-            for message in history:
-                raw = message.time
-                seconds = raw / 1000 if raw and raw > 10**12 else raw
-                if not seconds or seconds * 1000 < since_ms:
-                    continue
+async def _names(client: Client, history: list) -> dict[int, str]:
+    """Имена авторов: в сообщении MAX отдаёт только id отправителя."""
+    senders = {m.sender for m in history if m.sender}
+    users = await client.get_users(list(senders)) if senders else []
+    return {u.id: (u.names[0].name if u.names else str(u.id)) for u in users}
 
-                # Текст и пометка о вложениях — вместе: подпись к фото тоже важна
-                caption = (message.text or "").strip()
-                text = " ".join(part for part in (caption, describe_attachments(message)) if part).strip()
-                if not text:
-                    continue
 
-                messages.append(
+def _seconds(message) -> int:
+    """Время сообщения в секундах. Ноль означает «времени нет»."""
+    raw = message.time
+    seconds = raw / 1000 if raw and raw > 10**12 else raw
+    return int(seconds) if seconds else 0
+
+
+async def fetch_window(telegram_id: int, phone: str, chat_id: int, hours: int, limit: int) -> list[dict]:
+    """Сообщения чата за последние `hours` часов."""
+    since_ms = _since_ms(hours)
+
+    async with _session(telegram_id, phone) as client:
+        history = await _history(client, chat_id, since_ms, limit)
+        names = await _names(client, history)
+
+        messages = []
+        for message in history:
+            seconds = _seconds(message)
+            if not seconds or seconds * 1000 < since_ms:
+                continue
+
+            # Текст и пометка о вложениях — вместе: подпись к фото тоже важна
+            caption = (message.text or "").strip()
+            text = " ".join(part for part in (caption, describe_attachments(message)) if part).strip()
+            if not text:
+                continue
+
+            messages.append(
+                {
+                    "time": seconds,
+                    "author": names.get(message.sender, "Участник"),
+                    "text": text,
+                    # Подпись отдельно от текста: по ней решаем, смотреть ли на картинку
+                    "caption": caption,
+                    "photos": photo_links(message),
+                }
+            )
+
+        messages.sort(key=lambda m: m["time"])
+        await vision.enrich(telegram_id, messages)
+        return messages
+
+
+async def fetch_photos(telegram_id: int, phone: str, chat_id: int, hours: int, limit: int) -> list[dict]:
+    """
+    Последние фотографии чата — со свежими ссылками.
+
+    Ссылки MAX подписывает сроком, поэтому хранить их негде: перед пересылкой
+    окно читается заново, и ссылка живёт ровно до скачивания.
+    """
+    since_ms = _since_ms(hours)
+
+    async with _session(telegram_id, phone) as client:
+        history = await _history(client, chat_id, since_ms, config.max_messages)
+        names = await _names(client, history)
+
+        photos = []
+        for message in history:
+            seconds = _seconds(message)
+            if not seconds or seconds * 1000 < since_ms:
+                continue
+            for photo_id, url in photo_links(message):
+                photos.append(
                     {
-                        "time": int(seconds),
+                        "time": seconds,
                         "author": names.get(message.sender, "Участник"),
-                        "text": text,
-                        # Подпись отдельно от текста: по ней решаем, смотреть ли на картинку
-                        "caption": caption,
-                        "photos": photo_links(message),
+                        "caption": (message.text or "").strip(),
+                        "photo_id": photo_id,
+                        "url": url,
                     }
                 )
 
-            messages.sort(key=lambda m: m["time"])
-            await vision.enrich(telegram_id, messages)
-            return messages
-        finally:
-            await client.close()
+    photos.sort(key=lambda p: p["time"])
+    return photos[-limit:]
+
+
+# Фото из чата — снимок с телефона, а не документ: тяжелее этого не приходит
+PHOTO_MAX_BYTES = 10 * 1024 * 1024
+
+
+async def download_photo(url: str) -> bytes | None:
+    """
+    Байты фотографии. None — ссылка протухла или картинка неподъёмная.
+
+    Качаем сами, а не даём ссылку Telegram: она подписана сроком и закрыта
+    для чужих серверов.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as web:
+            response = await web.get(url)
+    except Exception as exc:  # noqa: BLE001 — одна недоступная картинка не ломает пересылку
+        log.info("фото не скачал: %s", exc)
+        return None
+
+    if response.status_code != 200 or len(response.content) > PHOTO_MAX_BYTES:
+        log.info("фото не скачал: код %s, байт %s", response.status_code, len(response.content))
+        return None
+    return response.content
 
 
 async def count_recent(telegram_id: int, phone: str, chat_ids: list[int], minutes: int) -> dict[int, int]:
@@ -389,22 +476,14 @@ async def count_recent(telegram_id: int, phone: str, chat_ids: list[int], minute
     Если сообщений там больше сотни — вернём сотню, всплеск это всё равно докажет.
     Все чаты обходим в одной сессии MAX: лишние входы — лишний повод для подозрений.
     """
-    since_ms = (time.time() - minutes * 60) * 1000
+    since_ms = _since_ms(minutes / 60)
     counts: dict[int, int] = {}
 
-    with crypto.session_workdir(telegram_id) as work_dir:
-        catalog, version = await _version()
-        client = Client(
-            phone=phone, work_dir=str(work_dir), app_version=version, catalog=catalog
-        )
-        await client.connect()
-        try:
-            for chat_id in chat_ids:
-                page = await client.fetch_history(chat_id=chat_id, backward=PAGE)
-                counts[chat_id] = sum(1 for m in page or [] if (m.time or 0) >= since_ms)
-                await asyncio.sleep(0.3)
-        finally:
-            await client.close()
+    async with _session(telegram_id, phone) as client:
+        for chat_id in chat_ids:
+            page = await client.fetch_history(chat_id=chat_id, backward=PAGE)
+            counts[chat_id] = sum(1 for m in page or [] if (m.time or 0) >= since_ms)
+            await asyncio.sleep(0.3)
 
     return counts
 
@@ -471,25 +550,17 @@ async def code_arrived(telegram_id: int, phone: str, since_ms: float) -> bool:
     Коды MAX кладёт в диалог с ботом «Коды подтверждения», а туда мы попадаем
     той же сессией, что читаем чаты. Групп не касаемся: код приходит в личку.
     """
-    with crypto.session_workdir(telegram_id) as work_dir:
-        catalog, version = await _version()
-        client = Client(
-            phone=phone, work_dir=str(work_dir), app_version=version, catalog=catalog
-        )
-        await client.connect()
-        try:
-            for chat in await client.fetch_chats():
-                if not str(chat.type or "").upper().endswith("DIALOG"):
+    async with _session(telegram_id, phone) as client:
+        for chat in await client.fetch_chats():
+            if not str(chat.type or "").upper().endswith("DIALOG"):
+                continue
+            page = await client.fetch_history(chat_id=chat.id, backward=5)
+            for message in page or []:
+                if (message.time or 0) < since_ms:
                     continue
-                page = await client.fetch_history(chat_id=chat.id, backward=5)
-                for message in page or []:
-                    if (message.time or 0) < since_ms:
-                        continue
-                    text = getattr(message, "text", "") or ""
-                    if any(marker in text for marker in CODE_MARKERS):
-                        return True
-                await asyncio.sleep(0.2)
-        finally:
-            await client.close()
+                text = getattr(message, "text", "") or ""
+                if any(marker in text for marker in CODE_MARKERS):
+                    return True
+            await asyncio.sleep(0.2)
 
     return False

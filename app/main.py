@@ -10,7 +10,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import BotCommand
 
 from . import db, scheduler
-from .bot import commands, handlers
+from .bot import admin, commands, handlers
 from .config import config
 
 logging.basicConfig(
@@ -28,6 +28,7 @@ async def main() -> None:
     dispatcher = Dispatcher(storage=MemoryStorage())
     # Команды идут первыми: иначе состояние онбординга перехватит /stop и /help
     dispatcher.include_router(commands.router)
+    dispatcher.include_router(admin.router)
     dispatcher.include_router(handlers.router)
 
     # Синяя кнопка «Меню» в Telegram — берётся из этого списка

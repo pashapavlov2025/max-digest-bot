@@ -5,10 +5,11 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
+from aiogram.types import BufferedInputFile, InlineKeyboardMarkup
 
 from . import db, digest, errors, llm, max_client
 from .config import config
-from .bot import texts
+from .bot import keyboards, texts
 
 log = logging.getLogger(__name__)
 
@@ -95,14 +96,17 @@ async def _digest_chat(
 
         # Есть что напомнить про завтра, но сводки не получилось: короткая форма
         await send_long(
-            bot, user.telegram_id, digest.render_quiet(result, hours, len(messages), chat.title)
+            bot,
+            user.telegram_id,
+            digest.render_quiet(result, hours, len(messages), chat.title),
+            keyboards.under_digest(chat.chat_id, hours),
         )
         db.log_event(user.telegram_id, "digest_quiet", f"{chat.title}: {len(messages)} сообщений")
         db.note_usage(user.telegram_id, "digest", tally)
         return True
 
     text = digest.render(result, hours, len(messages), chat.title)
-    await send_long(bot, user.telegram_id, text)
+    await send_long(bot, user.telegram_id, text, keyboards.under_digest(chat.chat_id, hours))
     db.log_event(user.telegram_id, "digest_sent", f"{chat.title}: {len(messages)} сообщений")
     db.note_usage(user.telegram_id, "digest", tally)
     return True
@@ -204,9 +208,15 @@ async def send_morning(bot: Bot, user: db.User) -> bool:
     return True
 
 
-async def answer_question(bot: Bot, user: db.User, question: str, days: int = 30) -> None:
+async def answer_question(
+    bot: Bot, user: db.User, question: str, days: int = 30, chat: db.Chat | None = None
+) -> None:
     """
-    Ищет ответ во всех подключённых чатах.
+    Ищет ответ в переписке — во всех чатах или в одном, если он назван.
+
+    Названный чат приходит от кнопки под сводкой: вопрос рождается при чтении
+    сводки одного чата, и веер по остальным там только удваивает счёт и путает
+    ответом из чужой переписки.
 
     Чаты, где про это не писали, молчат: три вежливых «не нашёл» вместо
     одного ответа — худшее, что можно сделать с вопросом.
@@ -214,15 +224,16 @@ async def answer_question(bot: Bot, user: db.User, question: str, days: int = 30
     if not user.phone or not user.chats:
         return
 
+    targets = [chat] if chat else user.chats
     tally = llm.start_tally()
     answers: list[tuple[str, str]] = []
-    for chat in user.chats:
+    for target in targets:
         try:
             messages = await max_client.fetch_window(
-                user.telegram_id, user.phone, chat.chat_id, days * 24, config.max_messages
+                user.telegram_id, user.phone, target.chat_id, days * 24, config.max_messages
             )
         except Exception as exc:  # noqa: BLE001
-            await report_failure(bot, user, exc, where=chat.title, announce=True)
+            await report_failure(bot, user, exc, where=target.title, announce=True)
             continue
 
         if not messages:
@@ -231,21 +242,28 @@ async def answer_question(bot: Bot, user: db.User, question: str, days: int = 30
         try:
             reply = await digest.answer(question, messages, days, provider=user.llm_provider)
         except Exception as exc:  # noqa: BLE001
-            await report_failure(bot, user, exc, where=chat.title, announce=True, kind_hint="llm")
+            await report_failure(bot, user, exc, where=target.title, announce=True, kind_hint="llm")
             continue
 
         if not digest.is_nothing(reply):
-            answers.append((chat.title, reply))
+            answers.append((target.title, reply))
 
-    db.log_event(user.telegram_id, "question_asked", question[:100])
+    detail = f"{chat.title}: {question}" if chat else question
+    db.log_event(user.telegram_id, "question_asked", detail[:100])
     db.note_usage(user.telegram_id, "question", tally)
 
     if not answers:
-        await bot.send_message(user.telegram_id, texts.ANSWER_EMPTY)
+        # Про один чат и отвечаем про один: «в чатах не писали» тут звучит
+        # так, будто искали шире, чем на самом деле искали
+        empty = (
+            texts.ANSWER_EMPTY_CHAT.format(title=digest.esc(chat.title)) if chat else texts.ANSWER_EMPTY
+        )
+        await bot.send_message(user.telegram_id, empty)
         return
 
     header = f"<b>❓ {digest.esc(question)}</b>"
-    if len(answers) == 1 and len(user.chats) == 1:
+    # Название чата в шапке лишнее, когда чат и так один — выбранный или единственный
+    if len(answers) == 1 and (chat is not None or len(user.chats) == 1):
         await send_long(bot, user.telegram_id, f"{header}\n\n{digest.esc(answers[0][1])}")
         return
 
@@ -253,6 +271,74 @@ async def answer_question(bot: Bot, user: db.User, question: str, days: int = 30
     for title, reply in answers:
         parts.append(f"\n<b>{digest.esc(title)}</b>\n{digest.esc(reply)}")
     await send_long(bot, user.telegram_id, "\n".join(parts))
+
+
+# Больше десятка снимков подряд — это уже не «посмотреть», а засыпать ленту
+PHOTOS_SHOWN = 10
+
+
+def _photo_caption(item: dict) -> str:
+    """Кто и когда прислал. Без этого пачка фото — набор картинок ниоткуда."""
+    stamp = datetime.fromtimestamp(item["time"], ZoneInfo(config.timezone)).strftime("%d.%m %H:%M")
+    line = f"{digest.esc(item['author'])} · {stamp}"
+    return f"{line}\n{digest.esc(item['caption'])}" if item["caption"] else line
+
+
+async def send_photos(bot: Bot, user: db.User, chat: db.Chat, hours: int) -> int:
+    """
+    Пересылает последние фотографии чата — человек смотрит их сам.
+
+    Модель к ним не зовём: по замеру из `vision` большинство снимков в чате
+    пересказывать нечего, а тут и незачем — смотрит человек.
+
+    К какой строке сводки относится фото, не угадываем: сводка — проза модели,
+    привязать к ней картинку честно не выйдет. Показываем последние за то же
+    окно, под которым стояла кнопка.
+    """
+    if not user.phone:
+        return 0
+
+    period = digest.period_label(hours)
+    try:
+        photos = await max_client.fetch_photos(
+            user.telegram_id, user.phone, chat.chat_id, hours, PHOTOS_SHOWN
+        )
+    except Exception as exc:  # noqa: BLE001
+        await report_failure(bot, user, exc, where=chat.title, announce=True)
+        return 0
+
+    if not photos:
+        await bot.send_message(
+            user.telegram_id,
+            texts.PHOTOS_EMPTY.format(title=digest.esc(chat.title), period=period),
+        )
+        return 0
+
+    await bot.send_message(
+        user.telegram_id, texts.PHOTOS_HEADER.format(title=digest.esc(chat.title), period=period)
+    )
+
+    sent = 0
+    for item in photos:
+        # Ссылки MAX подписывает сроком — качаем по одной, пока они свежие
+        data = await max_client.download_photo(item["url"])
+        if not data:
+            continue
+        try:
+            await bot.send_photo(
+                user.telegram_id,
+                BufferedInputFile(data, filename=f"{item['photo_id'] or item['time']}.jpg"),
+                caption=_photo_caption(item),
+            )
+        except Exception as exc:  # noqa: BLE001 — одна отвергнутая картинка не отменяет остальные
+            log.warning("фото не ушло в Telegram: %s", exc)
+            continue
+        sent += 1
+
+    if not sent:
+        await bot.send_message(user.telegram_id, texts.PHOTOS_FAILED)
+    db.log_event(user.telegram_id, "photos_sent", f"{chat.title}: {sent} из {len(photos)}")
+    return sent
 
 
 async def send_burst(bot: Bot, user: db.User, chat: db.Chat, hours: int = 3) -> bool:
@@ -323,25 +409,34 @@ async def notify_admins(bot: Bot, text: str) -> None:
 SECTION_FILL = 0.7
 
 
-async def send_long(bot: Bot, chat_id: int, text: str) -> None:
+async def send_long(
+    bot: Bot, chat_id: int, text: str, keyboard: InlineKeyboardMarkup | None = None
+) -> None:
     """
     Telegram не принимает больше 4096 символов — режем по строкам.
 
     Режем по возможности на границе раздела, а не посреди списка: сводка
     за неделю в лимит не влезает, и разрыв между «Наглядной геометрией»
     и заголовком «Решения» выглядит поломкой, а не длинным сообщением.
+
+    Клавиатура достаётся последнему куску: кнопки относятся ко всей сводке,
+    а у человека под большим пальцем её конец.
     """
     if len(text) <= LIMIT:
-        await bot.send_message(chat_id, text)
+        await bot.send_message(chat_id, text, reply_markup=keyboard)
         return
 
+    chunks = []
     chunk = ""
     for line in text.split("\n"):
         overflow = len(chunk) + len(line) + 1 > LIMIT
         section = line.startswith("<b>") and len(chunk) > LIMIT * SECTION_FILL
         if chunk and (overflow or section):
-            await bot.send_message(chat_id, chunk.strip())
+            chunks.append(chunk.strip())
             chunk = ""
         chunk += ("\n" if chunk else "") + line
     if chunk.strip():
-        await bot.send_message(chat_id, chunk.strip())
+        chunks.append(chunk.strip())
+
+    for number, part in enumerate(chunks, 1):
+        await bot.send_message(chat_id, part, reply_markup=keyboard if number == len(chunks) else None)
