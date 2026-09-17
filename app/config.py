@@ -29,10 +29,12 @@ class Config:
         return os.environ.get("ABOUT_URL", "https://pashapavlov2025.github.io/max-digest-bot/").strip()
 
     # Присмотр за доставкой кодов: во сколько проверять и как часто дёргать
-    # настоящий код. Пустое значение выключает проверки целиком.
+    # настоящий код. Пустое значение выключает проверки целиком. Время дневное:
+    # проверка кладёт админу в MAX «кто-то пытается войти», и в пять утра
+    # это будит, а не предупреждает.
     @property
     def watchdog_time(self) -> str:
-        return os.environ.get("WATCHDOG_TIME", "05:40").strip()
+        return os.environ.get("WATCHDOG_TIME", "11:00").strip()
 
     @property
     def watchdog_canary_days(self) -> int:

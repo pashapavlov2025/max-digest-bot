@@ -213,7 +213,9 @@ async def _check_version(bot: Bot) -> None:
     Не отстали ли мы от живых версий MAX.
 
     Проверка дешёвая и без следов: сверяем, чем представляемся, со списком
-    свежих сборок. Именно это отставание и сломало вход в сентябре.
+    свежих сборок. Отставание само по себе не поломка — MAX выпускает сборки
+    чаще, чем перестаёт принимать старые, — поэтому говорим о нём один раз
+    на каждую новую сборку и без звука, а не каждое утро.
     """
     try:
         newest = await max_client.newest_versions()
@@ -221,42 +223,50 @@ async def _check_version(bot: Bot) -> None:
         log.warning("не смог узнать свежие версии MAX: %s", exc)
         return
 
-    if max_client.APP_VERSION in newest:
+    if not newest or max_client.APP_VERSION in newest:
         log.info("версия клиента %s в числе свежих", max_client.APP_VERSION)
         return
 
-    versions = ", ".join(newest)
-    db.log_event(None, "version_stale", f"{max_client.APP_VERSION}, свежие: {versions}")
+    detail = f"{max_client.APP_VERSION} → {newest[0]}"
+    last = db.last_event("version_stale")
+    if last and last["detail"] == detail:
+        log.info("версия клиента отстаёт (%s), админ уже знает", detail)
+        return
+
+    db.log_event(None, "version_stale", detail)
     await service.notify_admins(
         bot,
-        "⚠️ Версия клиента MAX устарела.\n\n"
-        f"Мы представляемся {max_client.APP_VERSION}, а свежие сейчас: {versions}.\n\n"
-        "Пока вход работает, но именно так он и сломался в прошлый раз: MAX "
-        "перестаёт отправлять коды, не показывая ошибки. Стоит поднять "
+        f"ℹ️ Вышла сборка MAX {newest[0]}, бот представляется {max_client.APP_VERSION}.\n\n"
+        "Вход пока работает. Чинить ничего не надо, но при случае стоит поднять "
         "APP_VERSION в app/max_client.py.",
+        silent=True,
     )
 
 
 async def _check_delivery(bot: Bot) -> None:
     """
-    Настоящая проверка: просим код себе и смотрим, дошёл ли он.
+    Настоящая проверка: просим код на номер админа и смотрим, дошёл ли он.
 
-    Дёргаем нечасто — каждая проверка кладёт админу в MAX сообщение «кто-то
-    пытается войти», и делать это ежедневно незачем. Зато она отвечает на
-    вопрос, который иначе не проверить ничем: коды доходят или нет.
+    Код просим только у админа и нечасто — каждая проверка кладёт ему в MAX
+    «кто-то пытается войти». Пользователей это не касается никак.
+
+    Тревогу поднимаем один раз, на переходе «работало → сломалось», и так же
+    один раз говорим, что починилось. Пока сломано, проверяем по-прежнему
+    раз в `watchdog_canary_days` дней, а не каждое утро.
     """
     days = config.watchdog_canary_days
     if days <= 0:
         return
 
-    last = db.last_event_at("delivery_ok") or db.last_event_at("delivery_failed")
+    last = db.last_event("delivery_ok", "delivery_failed")
     if last:
         try:
-            when = datetime.fromisoformat(last).replace(tzinfo=timezone.utc)
+            when = datetime.fromisoformat(last["at"]).replace(tzinfo=timezone.utc)
             if datetime.now(timezone.utc) - when < timedelta(days=days):
                 return
         except ValueError:
             pass
+    was_failing = bool(last) and last["kind"] == "delivery_failed"
 
     user = next(
         (u for u in db.ready_users() if u.telegram_id in config.admin_ids and u.phone), None
@@ -266,10 +276,12 @@ async def _check_delivery(bot: Bot) -> None:
         return
 
     since_ms = time.time() * 1000
+    asked_at = datetime.now(ZoneInfo(config.timezone)).strftime("%H:%M")
     request = await max_client.probe_code(user.phone)
     if request is None:
         db.log_event(user.telegram_id, "delivery_failed", "MAX не принял запрос кода")
-        await service.notify_admins(bot, "⚠️ MAX не принял запрос кода — вход, похоже, сломан.")
+        if not was_failing:
+            await service.notify_admins(bot, "⚠️ MAX не принял запрос кода — вход новых людей, похоже, сломан.")
         return
 
     # Доставка занимает секунды, но пусть у MAX будет запас
@@ -284,14 +296,20 @@ async def _check_delivery(bot: Bot) -> None:
     if arrived:
         db.log_event(user.telegram_id, "delivery_ok", str(request))
         log.info("проверка доставки кода: код дошёл")
+        if was_failing:
+            await service.notify_admins(bot, "✅ Коды входа MAX снова доходят.", silent=True)
         return
 
     db.log_event(user.telegram_id, "delivery_failed", str(request))
+    if was_failing:
+        log.info("проверка доставки кода: по-прежнему не дошёл, админ уже знает")
+        return
     await service.notify_admins(
         bot,
-        "⚠️ Код входа не дошёл.\n\n"
-        f"MAX принял запрос ({request}), но сообщение с кодом в мессенджере "
-        "не появилось. Значит новые люди подключиться не смогут, хотя у всех "
-        "подключённых сводки идут как обычно.\n\n"
-        f"Первым делом стоит проверить версию клиента: сейчас {max_client.APP_VERSION}.",
+        f"⚠️ Проверочный код входа не нашёлся.\n\n"
+        f"В {asked_at} бот попросил код на ваш номер. Если в MAX он пришёл — "
+        "это ложная тревога, ничего делать не нужно. Если нет — новые люди "
+        "подключиться не смогут (у подключённых сводки идут как обычно), и "
+        f"первым делом стоит поднять версию клиента: сейчас {max_client.APP_VERSION}.\n\n"
+        f"Следующая проверка через {days} дн.",
     )

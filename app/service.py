@@ -416,10 +416,10 @@ async def report_failure(
     return failure
 
 
-async def notify_admins(bot: Bot, text: str) -> None:
+async def notify_admins(bot: Bot, text: str, silent: bool = False) -> None:
     for admin_id in config.admin_ids:
         try:
-            await bot.send_message(admin_id, text)
+            await bot.send_message(admin_id, text, disable_notification=silent)
         except Exception as exc:  # noqa: BLE001 — админ тоже мог не начать диалог с ботом
             log.warning("не смог уведомить админа %s: %s", admin_id, exc)
 

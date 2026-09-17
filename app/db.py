@@ -683,8 +683,16 @@ def recent_events(limit: int = 30, telegram_id: int | None = None) -> list[dict]
 
 def last_event_at(kind: str) -> str | None:
     """Когда в последний раз случалось событие такого рода."""
+    event = last_event(kind)
+    return event["at"] if event else None
+
+
+def last_event(*kinds: str) -> dict | None:
+    """Самое свежее событие из перечисленных родов: когда, что и с какими подробностями."""
+    marks = ", ".join("?" * len(kinds))
     with connect() as conn:
         row = conn.execute(
-            "SELECT at FROM events WHERE kind = ? ORDER BY id DESC LIMIT 1", (kind,)
+            f"SELECT at, kind, detail FROM events WHERE kind IN ({marks}) ORDER BY id DESC LIMIT 1",
+            kinds,
         ).fetchone()
-    return row["at"] if row else None
+    return dict(row) if row else None
