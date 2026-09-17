@@ -16,6 +16,7 @@ from app import db, max_client, scheduler
 @pytest.fixture
 def admin(monkeypatch, user):
     monkeypatch.setenv("ADMIN_IDS", str(user.telegram_id))
+    monkeypatch.setenv("WATCHDOG_CANARY_DAYS", "7")
     return user
 
 
@@ -112,6 +113,12 @@ async def test_о_починке_говорим_один_раз(bot, admin, prob
 
     assert len(bot.messages) == 2
     assert "снова доходят" in bot.messages[1][1]
+
+
+async def test_проверка_кодом_по_умолчанию_выключена(bot, admin, probe, monkeypatch):
+    monkeypatch.delenv("WATCHDOG_CANARY_DAYS")
+    await scheduler._check_delivery(bot)
+    assert probe["asked"] == 0
 
 
 async def test_когда_всё_работает_молчим(bot, admin, probe):

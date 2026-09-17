@@ -36,9 +36,12 @@ class Config:
     def watchdog_time(self) -> str:
         return os.environ.get("WATCHDOG_TIME", "11:00").strip()
 
+    # Проверка настоящим кодом по умолчанию выключена: MAX шлёт код то в чат
+    # «Коды подтверждения», то SMS, а SMS бот не видит. 17 сентября 2026 код
+    # пришёл по SMS, а бот поднял ложную тревогу — в пять утра, вместе с SMS.
     @property
     def watchdog_canary_days(self) -> int:
-        return int(os.environ.get("WATCHDOG_CANARY_DAYS", "7"))
+        return int(os.environ.get("WATCHDOG_CANARY_DAYS", "0"))
 
     # --- Хранилище ---
     # Каталоги с данными закрыты от посторонних локальных пользователей:
